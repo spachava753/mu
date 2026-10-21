@@ -264,12 +264,12 @@ func TestUpdateReductionAndTerminalExtensions(t *testing.T) {
 		t.Fatal(got)
 	}
 	a.update(id, r, acp.SessionNotification{SessionId: "wrong", Update: acp.UpdateAgentMessageText("ignore")})
-	a.terminalOutput(id, r, "s", "term", "early output")
+	a.terminalOutput(id, r, 0, "s", "term", "early output")
 	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{ToolCallId: "tool", Title: "Run", Content: []acp.ToolCallContent{acp.ToolTerminalRef("term")}}}})
 	if lastText(findThread(t, a, id)) != "early output" {
 		t.Fatal("lost output before tool notification")
 	}
-	a.terminalOutput(id, r, "s", "term", "completed output")
+	a.terminalOutput(id, r, 0, "s", "term", "completed output")
 	if lastText(findThread(t, a, id)) != "completed output" {
 		t.Fatal("terminal did not update")
 	}

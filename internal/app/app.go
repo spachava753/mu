@@ -25,12 +25,18 @@ type Permission struct {
 
 type ThreadView struct {
 	state.Thread
-	Status      string
-	Error       string
-	Permissions []Permission
+	Status       string
+	Error        string
+	Permissions  []Permission
+	Connected    bool
+	Configuring  bool
+	SessionError string
 }
 
 type Snapshot struct {
+	Agents                             []state.AgentConfig
+	DefaultAgentID                     string
+	SidebarCollapsed                   bool
 	Threads                            []ThreadView
 	LastCommand, LastCwd, StorageError string
 }
@@ -49,13 +55,21 @@ type job struct {
 	stopDone   chan struct{}
 }
 type runtime struct {
-	process       *agent.Process
-	session       string
-	job           *job
-	status, err   string
-	acceptUpdates bool
-	pending       map[string]*pending
-	outputs       map[string]string
+	process                         *agent.Process
+	session                         string
+	job                             *job
+	status, err                     string
+	acceptUpdates                   bool
+	pending                         map[string]*pending
+	outputs                         map[string]string
+	epoch                           uint64
+	initializing                    bool
+	initialUpdates                  []acp.SessionNotification
+	bootstrap                       string
+	configuring                     bool
+	sessionError                    string
+	configCancel                    context.CancelFunc
+	echoTarget, echoText, echoEntry string
 }
 
 type App struct {
@@ -77,6 +91,7 @@ func Open(dir string) (*App, error) {
 		return nil, err
 	}
 	a := &App{store: store, data: data, runtimes: map[string]*runtime{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a.migrateSettings()
 	for i := range a.data.Threads {
 		t := &a.data.Threads[i]
 		if t.Running {
@@ -145,12 +160,15 @@ func (a *App) runtimeLocked(id string) *runtime {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{LastCommand: a.data.LastCommand, LastCwd: a.data.LastCwd, StorageError: a.storageError}
+	s := Snapshot{LastCommand: a.data.LastCommand, LastCwd: a.data.LastCwd, StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed}
 	for _, t := range a.data.Threads {
 		t.Entries = slices.Clone(t.Entries)
+		t.Session = t.Session.Clone()
 		v := ThreadView{Thread: t}
 		if r := a.runtimes[t.ID]; r != nil {
 			v.Status, v.Error = r.status, r.err
+			v.Connected = r.process != nil && r.process.Alive() && r.session != ""
+			v.Configuring, v.SessionError = r.configuring, r.sessionError
 			for _, p := range r.pending {
 				v.Permissions = append(v.Permissions, p.Permission)
 			}
@@ -163,6 +181,10 @@ func (a *App) Snapshot() Snapshot {
 }
 
 func (a *App) Create(command, cwd string) (string, error) {
+	return a.create(command, cwd, "", "")
+}
+
+func (a *App) create(command, cwd, agentID, agentName string) (string, error) {
 	if _, err := agent.ParseCommand(command); err != nil {
 		return "", err
 	}
@@ -182,7 +204,7 @@ func (a *App) Create(command, cwd string) (string, error) {
 	if a.closed {
 		return "", errors.New("app is closing")
 	}
-	t := state.Thread{ID: state.ID(), Title: "New thread", Command: command, Cwd: cwd, Created: time.Now(), Updated: time.Now()}
+	t := state.Thread{ID: state.ID(), Title: "New thread", Command: command, AgentID: agentID, AgentName: agentName, Cwd: cwd, Created: time.Now(), Updated: time.Now()}
 	a.data.Threads = append(a.data.Threads, t)
 	oldCmd, oldCwd := a.data.LastCommand, a.data.LastCwd
 	a.data.LastCommand, a.data.LastCwd = command, cwd
@@ -204,8 +226,8 @@ func (a *App) Archive(id string, archive bool) error {
 	if t == nil {
 		return errors.New("thread not found")
 	}
-	if t.Running {
-		return errors.New("stop the current turn before archiving")
+	if t.Running || a.configuringLocked(id) {
+		return errors.New("wait for session requests and stop the current turn before archiving")
 	}
 	old := t.Archived
 	t.Archived = archive
@@ -233,8 +255,8 @@ func (a *App) Delete(id string) error {
 	if t == nil {
 		return errors.New("thread not found")
 	}
-	if t.Running {
-		return errors.New("stop the current turn before deleting")
+	if t.Running || a.configuringLocked(id) {
+		return errors.New("wait for session requests and stop the current turn before deleting")
 	}
 	old := a.data.Threads
 	a.data.Threads = slices.DeleteFunc(slices.Clone(old), func(t state.Thread) bool { return t.ID == id })
@@ -261,10 +283,11 @@ func (a *App) Fork(id string) (string, error) {
 	if source == nil {
 		return "", errors.New("thread not found")
 	}
-	if source.Running {
-		return "", errors.New("stop the current turn before forking")
+	if source.Running || a.configuringLocked(id) {
+		return "", errors.New("wait for session requests and stop the current turn before forking")
 	}
 	t := *source
+	t.Session = state.Session{}
 	t.ID, t.ParentID, t.SessionID = state.ID(), source.ID, ""
 	t.Title, t.Archived, t.Running = "Fork: "+source.Title, false, false
 	t.Created, t.Updated = time.Now(), time.Now()
@@ -298,6 +321,9 @@ func (a *App) Send(id, text string) error {
 		return errors.New("a turn is already running")
 	}
 	r := a.runtimeLocked(id)
+	if r.configuring {
+		return errors.New("wait for the session settings request to finish")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	j := &job{ctx: ctx, cancel: cancel, done: make(chan struct{}), stop: make(chan struct{}), promptDone: make(chan struct{})}
 	before := *t
@@ -317,6 +343,7 @@ func (a *App) Send(id, text string) error {
 		return err
 	}
 	r.job, r.status, r.err = j, "Connecting…", ""
+	r.echoTarget, r.echoText, r.echoEntry = text, "", ""
 	a.notifyLocked()
 	config := *t
 	a.wg.Add(1)
@@ -328,11 +355,13 @@ func (a *App) run(t state.Thread, history []state.Entry, text string, r *runtime
 	defer a.wg.Done()
 	defer j.cancel()
 	defer close(j.done)
-	p, prefix, err := a.connect(j.ctx, t, history, r, j)
+	p, prefix, err := a.connect(j.ctx, t, history, r)
 	var result acp.PromptResponse
 	if err == nil {
 		a.mu.Lock()
 		r.status, r.acceptUpdates = "Working…", true
+		r.bootstrap = ""
+		r.echoTarget = prefix + text
 		a.notifyLocked()
 		a.mu.Unlock()
 		result, err = p.Conn.Prompt(j.ctx, acp.PromptRequest{SessionId: acp.SessionId(r.session), Prompt: []acp.ContentBlock{acp.TextBlock(prefix + text)}})
@@ -349,10 +378,17 @@ func (a *App) run(t state.Thread, history []state.Entry, text string, r *runtime
 		a.mu.Lock()
 	}
 	defer a.mu.Unlock()
-	r.acceptUpdates = false
+	r.acceptUpdates = err == nil
+	r.echoTarget, r.echoText, r.echoEntry = "", "", ""
 	r.status = ""
 	if current := a.threadLocked(t.ID); current != nil {
 		current.Running, current.Updated = false, time.Now()
+		if err == nil {
+			current.NeedsContext = false
+		}
+		current.Session.TurnUsage = result.Usage
+		current.Session.StopReason = result.StopReason
+		storeMeta(&current.Session, "prompt", result.Meta)
 		if j.stopping || j.ctx.Err() != nil || result.StopReason == acp.StopReasonCancelled {
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: "Stopped. The response may be incomplete."})
 		} else if err != nil {
@@ -371,26 +407,34 @@ func (a *App) run(t state.Thread, history []state.Entry, text string, r *runtime
 	a.notifyLocked()
 }
 
-func (a *App) connect(ctx context.Context, t state.Thread, history []state.Entry, r *runtime, j *job) (*agent.Process, string, error) {
+func (a *App) connect(ctx context.Context, t state.Thread, history []state.Entry, r *runtime) (*agent.Process, string, error) {
 	a.mu.Lock()
 	p := r.process
-	session := r.session
+	session, bootstrap := r.session, r.bootstrap
 	a.mu.Unlock()
 	if p != nil && p.Alive() && session != "" {
-		return p, "", nil
+		return p, bootstrap, nil
 	}
 	if p != nil {
 		p.Close()
 	}
+	a.mu.Lock()
+	r.epoch++
+	epoch := r.epoch
+	r.initializing, r.initialUpdates, r.acceptUpdates = true, nil, false
+	r.session, r.bootstrap = "", ""
+	r.outputs = map[string]string{}
+	a.mu.Unlock()
+	defer func() { a.mu.Lock(); r.initializing = false; r.initialUpdates = nil; a.mu.Unlock() }()
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	p, err := agent.Start(initCtx, t.Command, t.Cwd, agent.Hooks{
-		Update: func(n acp.SessionNotification) { a.update(t.ID, r, n) },
+		Update: func(n acp.SessionNotification) { a.receive(t.ID, r, epoch, n) },
 		Terminal: func(session acp.SessionId, terminalID, output string) {
-			a.terminalOutput(t.ID, r, session, terminalID, output)
+			a.terminalOutput(t.ID, r, epoch, session, terminalID, output)
 		},
 		Permission: func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-			return a.permission(ctx, t.ID, r, req)
+			return a.permission(ctx, t.ID, r, epoch, req)
 		},
 	})
 	if err != nil {
@@ -400,9 +444,17 @@ func (a *App) connect(ctx context.Context, t state.Thread, history []state.Entry
 	r.process, r.session = p, ""
 	a.mu.Unlock()
 	var prefix, sessionID string
+	var options []acp.SessionConfigOption
+	var modes *acp.SessionModeState
+	var meta map[string]any
 	if t.SessionID != "" && p.Info.AgentCapabilities.LoadSession {
-		_, err = p.Conn.LoadSession(initCtx, acp.LoadSessionRequest{SessionId: acp.SessionId(t.SessionID), Cwd: t.Cwd, McpServers: []acp.McpServer{}})
+		var loaded acp.LoadSessionResponse
+		loaded, err = p.Conn.LoadSession(initCtx, acp.LoadSessionRequest{SessionId: acp.SessionId(t.SessionID), Cwd: t.Cwd, McpServers: []acp.McpServer{}})
+		options, modes, meta = loaded.ConfigOptions, loaded.Modes, loaded.Meta
 		sessionID = t.SessionID
+		if t.NeedsContext {
+			prefix = transcriptContext(history)
+		}
 		if err != nil {
 			err = fmt.Errorf("resume session: %w. Fork this thread to continue from its visible transcript", err)
 		}
@@ -410,6 +462,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, history []state.Entry
 		var session acp.NewSessionResponse
 		session, err = p.Conn.NewSession(initCtx, acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
 		sessionID = string(session.SessionId)
+		options, modes, meta = session.ConfigOptions, session.Modes, session.Meta
 		if len(history) > 0 {
 			prefix = transcriptContext(history)
 			a.mu.Lock()
@@ -427,9 +480,22 @@ func (a *App) connect(ctx context.Context, t state.Thread, history []state.Entry
 		return p, "", p.Error(err)
 	}
 	a.mu.Lock()
-	r.session = sessionID
+	r.session, r.bootstrap = sessionID, prefix
 	if current := a.threadLocked(t.ID); current != nil {
+		if current.SessionID != sessionID {
+			current.Session = state.Session{}
+		}
 		current.SessionID = sessionID
+		current.NeedsContext = prefix != ""
+		current.Session.Options, current.Session.Modes = options, modes
+		current.Session.Commands = nil
+		storeMeta(&current.Session, "setup", meta)
+		for _, n := range r.initialUpdates {
+			if string(n.SessionId) == sessionID {
+				a.updateLocked(t.ID, r, n)
+			}
+		}
+		r.initializing, r.initialUpdates, r.acceptUpdates = false, nil, true
 		err = a.saveLocked()
 	}
 	a.mu.Unlock()
@@ -480,10 +546,10 @@ func (a *App) Stop(id string) {
 	}()
 }
 
-func (a *App) permission(ctx context.Context, id string, r *runtime, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+func (a *App) permission(ctx context.Context, id string, r *runtime, epoch uint64, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	a.mu.Lock()
 	j := r.job
-	if j == nil || j.stopping || a.closed {
+	if j == nil || j.stopping || a.closed || r.epoch != epoch {
 		a.mu.Unlock()
 		return agent.CancelledPermission(), nil
 	}
@@ -542,6 +608,9 @@ func (a *App) Close() error {
 	for _, r := range a.runtimes {
 		if r.job != nil {
 			r.job.cancel()
+		}
+		if r.configCancel != nil {
+			r.configCancel()
 		}
 		if r.process != nil {
 			processes = append(processes, r.process)

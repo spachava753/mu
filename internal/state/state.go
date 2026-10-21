@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	acp "github.com/coder/acp-go-sdk"
 	"github.com/gofrs/flock"
 )
 
@@ -22,28 +23,64 @@ type Entry struct {
 	TerminalID string `json:"terminalId,omitempty"`
 	Title      string `json:"title,omitempty"`
 	Status     string `json:"status,omitempty"`
+	Details    string `json:"details,omitempty"`
+	PlanID     string `json:"planId,omitempty"`
 }
 
 type Thread struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Command   string    `json:"command"`
-	Cwd       string    `json:"cwd"`
-	SessionID string    `json:"sessionId,omitempty"`
-	ParentID  string    `json:"parentId,omitempty"`
-	Archived  bool      `json:"archived,omitempty"`
-	Running   bool      `json:"running,omitempty"`
-	Notice    string    `json:"notice,omitempty"`
-	Created   time.Time `json:"created"`
-	Updated   time.Time `json:"updated"`
-	Entries   []Entry   `json:"entries"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Command      string    `json:"command"`
+	AgentID      string    `json:"agentId,omitempty"`
+	AgentName    string    `json:"agentName,omitempty"`
+	Session      Session   `json:"session,omitempty"`
+	Cwd          string    `json:"cwd"`
+	SessionID    string    `json:"sessionId,omitempty"`
+	NeedsContext bool      `json:"needsContext,omitempty"`
+	ParentID     string    `json:"parentId,omitempty"`
+	Archived     bool      `json:"archived,omitempty"`
+	Running      bool      `json:"running,omitempty"`
+	Notice       string    `json:"notice,omitempty"`
+	Created      time.Time `json:"created"`
+	Updated      time.Time `json:"updated"`
+	Entries      []Entry   `json:"entries"`
+}
+
+// Session stores the last state reported by the agent, not client guesses.
+type Session struct {
+	Options        []acp.SessionConfigOption  `json:"options,omitempty"`
+	Modes          *acp.SessionModeState      `json:"modes,omitempty"`
+	Commands       []acp.AvailableCommand     `json:"commands,omitempty"`
+	Usage          *acp.SessionUsageUpdate    `json:"usage,omitempty"`
+	TurnUsage      *acp.Usage                 `json:"turnUsage,omitempty"`
+	StopReason     acp.StopReason             `json:"stopReason,omitempty"`
+	AgentUpdatedAt string                     `json:"agentUpdatedAt,omitempty"`
+	Metadata       map[string]json.RawMessage `json:"metadata,omitempty"`
+}
+
+// Clone isolates nested SDK unions, maps and slices from background updates.
+func (s Session) Clone() Session {
+	b, _ := json.Marshal(s)
+	var copy Session
+	_ = json.Unmarshal(b, &copy)
+	return copy
+}
+
+type AgentConfig struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Command string `json:"command"`
 }
 
 type Data struct {
-	Version     int      `json:"version"`
-	LastCommand string   `json:"lastCommand,omitempty"`
-	LastCwd     string   `json:"lastCwd,omitempty"`
-	Threads     []Thread `json:"threads"`
+	SettingsVersion  int           `json:"settingsVersion,omitempty"`
+	Agents           []AgentConfig `json:"agents,omitempty"`
+	DefaultAgentID   string        `json:"defaultAgentId,omitempty"`
+	SidebarCollapsed bool          `json:"sidebarCollapsed,omitempty"`
+	Version          int           `json:"version"`
+	LastCommand      string        `json:"lastCommand,omitempty"`
+	LastCwd          string        `json:"lastCwd,omitempty"`
+	Threads          []Thread      `json:"threads"`
 }
 
 func ID() string {

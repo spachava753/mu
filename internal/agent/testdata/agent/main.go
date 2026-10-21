@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -29,7 +30,10 @@ func update(session, kind, text string) {
 func finish(id json.RawMessage, reason string) { reply(id, map[string]any{"stopReason": reason}) }
 
 func main() {
-	noLoad := len(os.Args) > 1 && os.Args[1] == "no-load"
+	noLoad := slices.Contains(os.Args, "no-load")
+	withOptions := slices.Contains(os.Args, "session-ui")
+	legacy := slices.Contains(os.Args, "legacy-options")
+	model, enabled, mode := "fast", false, "ask"
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 	var pending json.RawMessage
@@ -40,23 +44,75 @@ func main() {
 			continue
 		}
 		var p struct {
-			SessionID string `json:"sessionId"`
-			Cwd       string `json:"cwd"`
-			Prompt    []struct {
+			SessionID          string          `json:"sessionId"`
+			Cwd                string          `json:"cwd"`
+			ConfigID           string          `json:"configId"`
+			Value              json.RawMessage `json:"value"`
+			ModeID             string          `json:"modeId"`
+			ClientCapabilities struct {
+				Plan    *struct{} `json:"planCapabilities"`
+				Session struct {
+					ConfigOptions struct {
+						Boolean *struct{} `json:"boolean"`
+					} `json:"configOptions"`
+				} `json:"session"`
+			} `json:"clientCapabilities"`
+			Prompt []struct {
 				Text string `json:"text"`
 			} `json:"prompt"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		switch m.Method {
 		case "initialize":
+			if withOptions && (p.ClientCapabilities.Plan == nil || p.ClientCapabilities.Session.ConfigOptions.Boolean == nil) {
+				reject(m.ID)
+				continue
+			}
 			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": !noLoad}, "agentInfo": map[string]any{"name": "test-agent", "version": "1"}})
 		case "session/new":
 			session = fmt.Sprintf("session-%d", os.Getpid())
-			reply(m.ID, map[string]any{"sessionId": session})
+			result := map[string]any{"sessionId": session}
+			if withOptions {
+				initialState(session)
+				result["configOptions"] = options(model, enabled)
+			}
+			if withOptions || legacy {
+				result["modes"] = modes(mode)
+			}
+			reply(m.ID, result)
 		case "session/load":
 			session = p.SessionID
 			update(session, "user_message_chunk", "replayed user")
 			update(session, "agent_message_chunk", "replayed answer")
+			result := map[string]any{}
+			if withOptions {
+				initialState(session)
+				result["configOptions"] = options(model, enabled)
+			}
+			if withOptions || legacy {
+				result["modes"] = modes(mode)
+			}
+			reply(m.ID, result)
+		case "session/set_config_option":
+			if slices.Contains(os.Args, "wait-config") {
+				continue
+			}
+			if p.ConfigID == "model" {
+				var value string
+				_ = json.Unmarshal(p.Value, &value)
+				if value == "reject" {
+					reject(m.ID)
+					continue
+				}
+				model = value
+			} else if p.ConfigID == "enabled" {
+				_ = json.Unmarshal(p.Value, &enabled)
+			}
+			reply(m.ID, map[string]any{"configOptions": options(model, enabled)})
+			notify(session, map[string]any{"sessionUpdate": "usage_update", "used": 16000, "size": 128000, "cost": map[string]any{"amount": 0.250, "currency": "EUR"}})
+		case "session/set_mode":
+			mode = p.ModeID
+			notify(session, map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": mode})
 			reply(m.ID, map[string]any{})
 		case "session/prompt":
 			text := ""
@@ -65,6 +121,9 @@ func main() {
 			}
 			session = p.SessionID
 			switch text {
+			case "updates":
+				sessionUpdates(session)
+				reply(m.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]any{"totalTokens": 30, "inputTokens": 10, "outputTokens": 20, "thoughtTokens": 3, "cachedReadTokens": 5, "cachedWriteTokens": 2}})
 			case "exit":
 				fmt.Fprintln(os.Stderr, "test agent disconnected")
 				os.Exit(7)
@@ -78,6 +137,9 @@ func main() {
 				pending = m.ID
 				send(map[string]any{"jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission", "params": map[string]any{"sessionId": session, "toolCall": map[string]any{"toolCallId": "tool-1", "title": "Run test command", "rawInput": map[string]any{"command": "printf test"}}, "options": []any{map[string]any{"optionId": "yes", "name": "Allow once", "kind": "allow_once"}, map[string]any{"optionId": "no", "name": "Reject", "kind": "reject_once"}}}})
 			default:
+				if withOptions {
+					update(session, "user_message_chunk", text)
+				}
 				update(session, "agent_message_chunk", "Echo: ")
 				update(session, "agent_message_chunk", text)
 				finish(m.ID, "end_turn")

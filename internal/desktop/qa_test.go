@@ -33,6 +33,7 @@ func TestQAConversation(t *testing.T) {
 			t.Fatalf("click %q: %v", label, err)
 		}
 		tt.Frame()
+		tt.Advance(320 * time.Millisecond)
 	}
 	await := func(condition func(app.ThreadView) bool) app.ThreadView {
 		t.Helper()
@@ -48,6 +49,8 @@ func TestQAConversation(t *testing.T) {
 				t.Fatal(thread.Error)
 			}
 			if condition(thread) {
+				// Render the state that may have arrived after the previous frame.
+				tt.Frame()
 				return thread
 			}
 			if time.Now().After(deadline) {
@@ -135,6 +138,7 @@ func TestQAThreadControls(t *testing.T) {
 					t.Fatalf("click %q: %v", label, err)
 				}
 				tt.Frame()
+				tt.Advance(320 * time.Millisecond)
 			}
 			click("Create thread")
 			if len(a.Snapshot().Threads) != 1 {

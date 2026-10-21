@@ -83,7 +83,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 	_ = writer.Close()
-	p.Conn = acp.NewClientSideConnection(p, p.stdin, p.stdout)
+	p.Conn = acp.NewClientSideConnection(p, capabilityWriter{p.stdin}, p.stdout)
 	p.Conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	go func() {
 		_ = cmd.Wait()
@@ -95,7 +95,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	info, err := p.Conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientInfo:         &acp.Implementation{Name: "mu", Version: "0.1.0"},
-		ClientCapabilities: acp.ClientCapabilities{Fs: acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true}, Terminal: true},
+		ClientCapabilities: acp.ClientCapabilities{Fs: acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true}, Terminal: true, PlanCapabilities: &acp.PlanCapabilities{}},
 	})
 	if err == nil && info.ProtocolVersion != acp.ProtocolVersionNumber {
 		err = fmt.Errorf("unsupported ACP version %d", info.ProtocolVersion)
