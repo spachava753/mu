@@ -25,10 +25,10 @@ func modal(c *ui.Context, open *bool, draw func()) ui.Element {
 	return ui.DialogBase(c, open, func(backdrop, panel ui.Element) {
 		// Animate the backdrop and its dialog as one surface. Animating only
 		// the panel wouldn't enter: its backdrop parent is also newly built.
-		backdrop.Background(ui.RGBA(0, 0, 0, 0.4)).Transition(fadeMotion)
+		backdrop.Background(ui.RGBA(0, 0, 0, 0.45)).Transition(fadeMotion)
 		w, h := c.Size()
-		panel.Padding(18, 20).Gap(12).Radius(10).Border(1, c.Theme().Border).Shadow(0, 0, 0, 0, ui.Transparent).
-			Background(c.Theme().Background).MaxWidth(w - 36).MaxHeight(h - 36)
+		panel.Padding(16, 18).Gap(12).Radius(10).Border(1, hairline(c.Theme())).Shadow(0, 0, 0, 0, ui.Transparent).
+			Background(c.Theme().Surface).MaxWidth(w - 36).MaxHeight(h - 36)
 		draw()
 	})
 }

@@ -71,7 +71,7 @@ func (v *View) imports(c *ui.Context, s app.Snapshot) {
 			}
 		}
 		ui.Row(c).Gap(12).Margin(6, 0, 0, 0).Children(func() {
-			ui.Text(c, fmt.Sprintf("%d sessions not added to Mu", available)).FontSize(13).FontWeight(600).SingleLine().Shrink(0)
+			ui.Text(c, fmt.Sprintf("%d sessions not added to Mu", available)).FontSize(13).FontWeight(500).SingleLine().Shrink(0)
 			ui.Spacer(c)
 			ui.TextInput(c.Key("session-search"), &v.importQuery).Label("Filter sessions").Placeholder("Filter sessions").Grow(1).MinWidth(120).MaxWidth(300)
 		})
@@ -101,12 +101,7 @@ func (v *View) imports(c *ui.Context, s app.Snapshot) {
 					if shown > 1 {
 						row.BorderWidth(1, 0, 0, 0).BorderColor(t.Border)
 					}
-					switch {
-					case selected:
-						row.Background(t.Background.Mix(t.Accent, 0.1))
-					case row.Hovered() && !added:
-						row.Background(t.SurfaceHover)
-					}
+					row.Background(rowColor(t, selected, row.Hovered() && !added))
 					dirs := strings.Join(append([]string{shortPath(item.Cwd)}, item.AdditionalDirectories...), " · ")
 					row.Children(func() {
 						box := ui.Box(c).Size(16, 16).Radius(4).Shrink(0).Center()
@@ -116,7 +111,7 @@ func (v *View) imports(c *ui.Context, s app.Snapshot) {
 						case selected:
 							box.Background(t.Accent).Children(func() { ui.Icon(c, checkIcon).Size(12, 12).TextColor(t.AccentText) })
 						default:
-							box.Border(1.5, t.TextMuted.Alpha(0.6))
+							box.Border(1, t.TextMuted.Alpha(0.55))
 						}
 						ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
 							ui.Row(c).Gap(8).Children(func() {

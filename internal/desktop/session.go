@@ -55,7 +55,7 @@ func (v *View) sessionDialog(c *ui.Context, s app.Snapshot) {
 		_, height := c.Size()
 		ui.Row(c).Width(440).Gap(8).Children(func() {
 			ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-				ui.Text(c, "Session options").FontSize(15).FontWeight(600)
+				ui.Text(c, "Session options").FontSize(14).FontWeight(500)
 				agent := t.AgentName
 				if agent == "" {
 					agent = commandName(t.Command)

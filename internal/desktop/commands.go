@@ -96,7 +96,7 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 	wasOpen := p.open
 	ui.PopoverBase(c.Key("slash-commands"), anchor, &p.open, func(panel ui.Element) {
 		bounds := anchor.Bounds()
-		panel.Transition(popupMotion).Label("Slash commands").AttachTo(anchor, ui.AnchorTopStart, ui.AnchorBottomStart).Width(bounds.W).Margin(0, 0, 6, 0).Padding(4).Radius(8).Border(1, c.Theme().Border).Background(c.Theme().Background)
+		panel.Transition(popupMotion).Label("Slash commands").AttachTo(anchor, ui.AnchorTopStart, ui.AnchorBottomStart).Width(bounds.W).Margin(0, 0, 6, 0).Padding(4).Radius(8).Border(1, hairline(c.Theme())).Background(c.Theme().Surface)
 		ui.Scroll(c).Label("Command choices").MaxHeight(min(240, max(64, bounds.Y-20))).Children(func() {
 			if len(matches) == 0 {
 				message := "No matching commands"
@@ -114,7 +114,7 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 			for i, command := range matches {
 				item := ui.ButtonBase(c.Key(command.Name)).Transition(colorMotion).Label("/"+command.Name).FillWidth().Padding(7, 10).Radius(5)
 				if i == p.index {
-					item.Background(c.Theme().SurfaceHover.Mix(c.Theme().Accent, 0.08))
+					item.Background(c.Theme().Text.Alpha(0.07))
 				} else if item.Hovered() {
 					item.Background(c.Theme().SurfaceHover)
 				}
@@ -123,7 +123,7 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 				}
 				item.Children(func() {
 					ui.Row(c).Grow(1).MinWidth(0).Gap(12).Children(func() {
-						ui.Text(c, "/"+command.Name).FontSize(12.5).FontWeight(600).Font("monospace").SingleLine().Shrink(0)
+						ui.Text(c, "/"+command.Name).FontSize(12.5).FontWeight(500).Font("monospace").SingleLine().Shrink(0)
 						ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
 							ui.Text(c, command.Description).FontSize(12).TextColor(c.Theme().TextMuted).SingleLine()
 							if command.Input != nil && command.Input.Unstructured != nil {

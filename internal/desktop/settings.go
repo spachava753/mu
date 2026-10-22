@@ -32,7 +32,7 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 		ui.Column(c).MaxWidth(640).Gap(14).Children(func() {
 			ui.Row(c).Gap(8).Children(func() {
 				ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-					ui.Text(c, "Agents").FontSize(13).FontWeight(600)
+					ui.Text(c, "Agents").FontSize(13).FontWeight(500)
 					ui.Text(c, "The default agent is selected for new threads.").FontSize(11.5).TextColor(t.TextMuted)
 				})
 				ui.Button(c, "Add agent").OnClick(func() {
@@ -51,21 +51,14 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 						row.BorderWidth(1, 0, 0, 0).BorderColor(t.Border)
 					}
 					selected := agent.ID == v.editAgent.ID
-					switch {
-					case selected:
-						row.Background(t.Background.Mix(t.Accent, 0.1))
-					case row.Hovered():
-						row.Background(t.SurfaceHover)
-					default:
-						row.Background(t.Background)
-					}
+					row.Background(rowColor(t, selected, row.Hovered()))
 					row.Children(func() {
 						ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-							ui.Text(c, agent.Name).FontSize(13).FontWeight(600).SingleLine()
+							ui.Text(c, agent.Name).FontSize(13).FontWeight(500).SingleLine()
 							ui.Text(c, agent.Command).SingleLine().Font("monospace").FontSize(11.5).TextColor(t.TextMuted).Tooltip(agent.Command)
 						})
 						if agent.ID == s.DefaultAgentID {
-							chip(c, "Default", t.Accent)
+							chip(c, "Default", t.TextMuted)
 						}
 					}).OnClick(func() {
 						v.editAgent = agent
@@ -79,7 +72,7 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 				if v.editAgent.ID != "" {
 					heading = "Edit agent"
 				}
-				ui.Text(c, heading).FontSize(13).FontWeight(600)
+				ui.Text(c, heading).FontSize(13).FontWeight(500)
 				field(c, "Name", "", func() {
 					ui.TextInput(c.Key("agent-name"), &v.editAgent.Name).Label("Agent name").Placeholder("A name for this configuration")
 				})
@@ -124,7 +117,7 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 
 func (v *View) removeAgentDialog(c *ui.Context) {
 	modal(c, &v.removeAgent, func() {
-		ui.Text(c, "Remove this agent configuration?").FontSize(15).FontWeight(600)
+		ui.Text(c, "Remove this agent configuration?").FontSize(14).FontWeight(500)
 		ui.Text(c, "Existing threads and their saved commands are not changed.").FontSize(13).TextColor(c.Theme().TextMuted).MaxWidth(400)
 		ui.Row(c).Gap(8).Justify(ui.End).Margin(6, 0, 0, 0).Children(func() {
 			ui.Button(c, "Keep agent").OnClick(func() { v.removeAgent = false })

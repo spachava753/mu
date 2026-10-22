@@ -151,13 +151,15 @@ func (v *View) Draw(c *ui.Context) {
 		}
 	}
 	matte(c)
+	v.md.Theme = markdownTheme(c.Theme())
 	// Keep the overlay parent alive so first-open and last-close transitions
 	// can animate. An empty layer draws nothing and takes no input.
 	ui.Overlay(c, func() {})
 	s := v.app.Snapshot()
 	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
 		v.sidebar(c, s)
-		ui.Column(c).Grow(1).MinWidth(0).Background(c.Theme().Background).Children(func() {
+		// The content is an inset panel on the chrome, as in Linear.
+		ui.Column(c).Grow(1).MinWidth(0).Margin(8, 8, 8, 0).Radius(8).Border(1, c.Theme().Border).Background(c.Theme().Background).Clip().Children(func() {
 			if s.LifecycleError != "" {
 				v.errorBox(c, s.LifecycleError)
 			}
@@ -196,8 +198,8 @@ func (v *View) Draw(c *ui.Context) {
 						return
 					}
 				}
-				ui.Column(c).Fill().Center().Gap(8).Padding(24).Children(func() {
-					ui.Text(c, "No thread selected").FontSize(16).FontWeight(600)
+				ui.Column(c).Fill().Center().Gap(6).Padding(24).Children(func() {
+					ui.Text(c, "No thread selected").FontSize(14).FontWeight(500)
 					ui.Text(c, "Choose a thread from the sidebar, or start a new one.").FontSize(13).TextColor(c.Theme().TextMuted)
 					ui.PrimaryButton(c, "Start a thread").Margin(8, 0, 0, 0).OnClick(v.openNew)
 				})
@@ -205,7 +207,7 @@ func (v *View) Draw(c *ui.Context) {
 		})
 	})
 	modal(c, &v.deleting, func() {
-		ui.Text(c, "Remove this thread from Mu?").FontSize(15).FontWeight(600)
+		ui.Text(c, "Remove this thread from Mu?").FontSize(14).FontWeight(500)
 		ui.Text(c, "This removes only Mu’s session reference. The agent’s history and workspace files are unchanged. You can import the session again.").FontSize(13).TextColor(c.Theme().TextMuted).MaxWidth(420)
 		ui.Row(c).Gap(8).Justify(ui.End).Margin(6, 0, 0, 0).Children(func() {
 			ui.Button(c, "Keep thread").OnClick(func() { v.deleting = false })
@@ -234,7 +236,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 	if s.SidebarCollapsed {
 		target = railWidth
 	}
-	sidebar := ui.Column(c.Key("sidebar")).Label("Thread sidebar").Shrink(0).ClipX().Background(t.Surface).BorderWidth(0, 1, 0, 0).BorderColor(t.Border)
+	sidebar := ui.Column(c.Key("sidebar")).Label("Thread sidebar").Shrink(0).ClipX()
 	width := sidebar.AnimateTo("width", target, sidebarMotion)
 	sidebar.Width(width).Children(func() {
 		toggle := func() { v.fail(v.app.SetSidebarCollapsed(!s.SidebarCollapsed)) }
@@ -250,8 +252,8 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 			return
 		}
 		ui.Column(c.Key("thread-list")).Width(sidebarWidth - 1).Grow(1).MinHeight(0).Transition(fadeMotion).Children(func() {
-			ui.Row(c).Height(48).Shrink(0).Padding(0, 10, 0, 16).Gap(2).Children(func() {
-				ui.Text(c, "mu").FontSize(16).FontWeight(700).Grow(1).MinWidth(0).SingleLine()
+			ui.Row(c).Height(52).Shrink(0).Padding(0, 10, 0, 18).Gap(2).Children(func() {
+				ui.Text(c, "mu").FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine()
 				iconButton(c, "New thread", plusIcon).OnClick(v.openNew)
 				iconButton(c, "Collapse sidebar", panelIcon).OnClick(toggle)
 			})
@@ -261,20 +263,20 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 					count++
 				}
 			}
-			ui.Row(c).Shrink(0).Padding(4, 10, 4, 16).Gap(6).Children(func() {
+			ui.Row(c).Shrink(0).Padding(6, 10, 4, 18).Gap(6).Children(func() {
 				label := "Threads"
 				if v.archived {
 					label = "Archived"
 				}
-				ui.Text(c, label).FontSize(11).FontWeight(600).TextColor(t.TextMuted).SingleLine()
-				ui.Text(c, itoa(count)).FontSize(11).TextColor(t.TextMuted.Alpha(0.7)).Grow(1)
+				ui.Text(c, label).FontSize(12).FontWeight(500).TextColor(faint(t)).SingleLine()
+				ui.Text(c, itoa(count)).FontSize(12).TextColor(faint(t)).Grow(1)
 				toggle := "Show archived"
 				if v.archived {
 					toggle = "Show active"
 				}
 				quietButton(c, toggle).OnClick(func() { v.archived = !v.archived })
 			})
-			ui.Scroll(c).Grow(1).MinHeight(0).Gap(1).Padding(2, 8, 8, 8).Children(func() {
+			ui.Scroll(c).Grow(1).MinHeight(0).Gap(1).Padding(2, 10, 8, 10).Children(func() {
 				for _, thread := range s.Threads {
 					if thread.Archived == v.archived {
 						v.threadRow(c, thread)
@@ -288,7 +290,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 					ui.Text(c, text).Padding(8).FontSize(12).TextColor(t.TextMuted)
 				}
 			})
-			ui.Column(c).Shrink(0).Padding(6, 8, 8, 8).Gap(1).BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Children(func() {
+			ui.Column(c).Shrink(0).Padding(6, 10, 10, 10).Gap(1).Children(func() {
 				navRow(c, "Import sessions", importIcon, v.importOpen).OnClick(v.openImports)
 				navRow(c, "Settings", gearIcon, v.settingsOpen).OnClick(v.openSettings)
 			})
@@ -319,16 +321,16 @@ func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 func (v *View) threadRow(c *ui.Context, thread app.ThreadView) {
 	t := c.Theme()
 	selected := thread.ID == v.selected && !v.creating && !v.settingsOpen && !v.importOpen
-	button := ui.ButtonBase(c.Key(thread.ID)).Transition(colorMotion).Label("Thread: "+thread.Title).Padding(7, 10).Radius(6).FillWidth()
-	button.Background(rowColor(t, selected, button.Hovered()))
+	button := ui.ButtonBase(c.Key(thread.ID)).Transition(colorMotion).Label("Thread: "+thread.Title).Padding(6, 8).Radius(5).FillWidth()
+	button.Background(sideColor(t, selected, button.Hovered()))
 	busy := thread.Running || thread.Configuring
 	button.Children(func() {
-		ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
 			status, color := threadStatus(t, thread)
 			ui.Row(c).Gap(6).Children(func() {
-				title := ui.Text(c, thread.Title).FontSize(13).SingleLine().Grow(1).MinWidth(0)
-				if selected {
-					title.FontWeight(600)
+				title := ui.Text(c, thread.Title).FontSize(13).FontWeight(500).SingleLine().Grow(1).MinWidth(0)
+				if !selected {
+					title.TextColor(t.Text.Mix(t.TextMuted, 0.35))
 				}
 				if status != "" && !thread.Configuring {
 					dot(c, color)
@@ -342,7 +344,7 @@ func (v *View) threadRow(c *ui.Context, thread app.ThreadView) {
 				}
 				meta = joinNonEmpty(" · ", agent, filepath.Base(thread.Cwd), timeLabel(thread.Updated))
 			}
-			text := ui.Text(c, meta).FontSize(11).TextColor(t.TextMuted).SingleLine()
+			text := ui.Text(c, meta).FontSize(11.5).TextColor(faint(t)).SingleLine()
 			if status != "" && color != t.TextMuted {
 				text.TextColor(color)
 			}
@@ -443,19 +445,18 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 	t := c.Theme()
 	busy := thread.Running || thread.Configuring
-	ui.Row(c).Height(52).Shrink(0).Padding(0, 12, 0, 24).Gap(2).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Children(func() {
-		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Margin(0, 8, 0, 0).Children(func() {
-			ui.Row(c).Gap(8).Children(func() {
-				ui.Text(c, thread.Title).FontSize(14.5).FontWeight(600).SingleLine().Shrink(1).MinWidth(0)
-				if thread.Archived {
-					chip(c, "Archived", t.TextMuted)
-				}
-			})
+	ui.Row(c).Height(44).Shrink(0).Padding(0, 10, 0, 20).Gap(2).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Children(func() {
+		ui.Row(c).Grow(1).MinWidth(0).Gap(8).Margin(0, 8, 0, 0).Children(func() {
+			// The title keeps priority; agent and path truncate first.
+			ui.Text(c, thread.Title).FontSize(13).FontWeight(500).SingleLine().Shrink(0).MaxWidthPercent(70)
+			if thread.Archived {
+				chip(c, "Archived", t.TextMuted)
+			}
 			agent := thread.AgentName
 			if agent == "" {
 				agent = commandName(thread.Command)
 			}
-			ui.Text(c, joinNonEmpty(" · ", agent, shortPath(thread.Cwd))).FontSize(11.5).TextColor(t.TextMuted).SingleLine().Tooltip(thread.Command + "\n" + thread.Cwd)
+			ui.Text(c, joinNonEmpty(" · ", agent, shortPath(thread.Cwd))).FontSize(12.5).TextColor(faint(t)).SingleLine().Shrink(3).MinWidth(0).Tooltip(thread.Command + "\n" + thread.Cwd)
 		})
 		if v.forkResult != nil {
 			ui.Spinner(c).Size(14, 14).Label("Forking session").Margin(0, 6)
@@ -534,7 +535,7 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 				}
 			})
 			if !list.AtEnd() && len(thread.Entries) > 0 {
-				jump := ui.ButtonBase(c).Transition(colorMotion).Label("Jump to latest").Attach(ui.AnchorBottom, ui.AnchorBottom).Bottom(10).Padding(5, 12).Radius(14).Border(1, t.Border).Gap(6)
+				jump := ui.ButtonBase(c).Transition(colorMotion).Label("Jump to latest").Attach(ui.AnchorBottom, ui.AnchorBottom).Bottom(10).Height(26).Padding(0, 10).Radius(6).Border(1, hairline(t)).Gap(6)
 				if jump.Hovered() {
 					jump.Background(t.SurfaceHover)
 				} else {
@@ -566,19 +567,19 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 	ui.Row(c.Key("composer")).Shrink(0).Justify(ui.Center).Padding(4, 24, 10, 24).Children(func() {
 		ui.Column(c).Grow(1).MaxWidth(readingWidth).MinWidth(0).Gap(6).Children(func() {
 			if thread.Archived {
-				ui.Row(c).Padding(10, 14).Gap(10).Radius(10).Border(1, t.Border).Background(t.Surface).Children(func() {
+				ui.Row(c).Padding(8, 8, 8, 14).Gap(10).Radius(8).Border(1, hairline(t)).Background(t.Surface).Children(func() {
 					ui.Text(c, "Archived. Restore this thread to continue.").FontSize(13).TextColor(t.TextMuted).Grow(1).MinWidth(0)
 					ui.Button(c, "Restore thread").OnClick(func() { v.archive(thread) })
 				})
 				v.usageLine(c, thread, false)
 				return
 			}
-			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(10).Border(1, t.Border).Background(t.Surface)
+			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(8).Border(1, hairline(t)).Background(t.Surface)
 			box.Children(func() {
 				if v.messageInput(c, thread, box).Focused() {
-					box.BorderColor(t.Focus.Mix(t.Border, 0.35))
+					box.BorderColor(hairline(t).Mix(t.Text, 0.18))
 				}
-				ui.Row(c).Padding(0, 6, 6, 6).Gap(2).Children(func() {
+				ui.Row(c).Padding(0, 6, 6, 7).Gap(2).Children(func() {
 					ui.Row(c).Grow(1).MinWidth(0).Gap(2).ClipX().Children(func() { v.inlineOptions(c, thread) })
 					iconAction(c, "Session options", slidersIcon, false).OnClick(func() { v.openSessionOptions(thread) })
 					if thread.Running || thread.Configuring {
@@ -587,7 +588,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 							status = thread.Status
 						}
 						ui.Spinner(c).Size(13, 13).Label("Agent working").Margin(0, 4, 0, 8)
-						ui.Text(c, status).FontSize(11.5).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0).Margin(0, 6, 0, 0)
+						ui.Text(c, status).FontSize(12).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0).Margin(0, 6, 0, 0)
 					}
 					if thread.Running {
 						roundButton(c, "Stop", stopIcon, false, false).OnClick(func() { v.app.Stop(thread.ID) })
@@ -603,22 +604,23 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 	})
 }
 
-// roundButton is the composer's send/stop action.
+// roundButton is the composer's send/stop action: the accent only while
+// there is something to send, otherwise a quiet outlined square.
 func roundButton(c *ui.Context, label string, icon *ui.SVG, primary, disabled bool) ui.Element {
 	t := c.Theme()
-	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).Tooltip(label).Size(30, 30).Radius(15).Shrink(0).Disabled(disabled)
-	bg, fg := t.SurfacePressed, t.Text
+	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).Tooltip(label).Size(26, 26).Radius(6).Shrink(0).Disabled(disabled)
+	bg, fg, border := ui.Transparent, t.Text, hairline(t)
 	switch {
 	case disabled:
-		bg, fg = t.SurfaceHover, t.TextMuted
+		fg = faint(t)
 	case primary && b.Hovered():
-		bg, fg = t.AccentHover, t.AccentText
+		bg, fg, border = t.AccentHover, t.AccentText, ui.Transparent
 	case primary:
-		bg, fg = t.Accent, t.AccentText
+		bg, fg, border = t.Accent, t.AccentText, ui.Transparent
 	case b.Hovered():
-		bg = t.SurfacePressed.Mix(t.Text, 0.08)
+		bg = t.Text.Alpha(0.06)
 	}
-	b.Background(bg).Children(func() { ui.Icon(c, icon).Size(16, 16).TextColor(fg) })
+	b.Background(bg).Border(1, border).Children(func() { ui.Icon(c, icon).Size(14, 14).TextColor(fg) })
 	return b
 }
 
@@ -692,15 +694,15 @@ func (v *View) entry(c *ui.Context, threadID string, e state.Entry) {
 		})
 	case "user":
 		ui.Row(c).Justify(ui.End).Children(func() {
-			ui.Column(c).MaxWidthPercent(85).Shrink(1).MinWidth(0).Padding(9, 14).Radius(12).Background(userBubble(t)).Gap(6).Children(func() {
-				ui.Text(c, e.Text).Selectable()
+			ui.Column(c).MaxWidthPercent(85).Shrink(1).MinWidth(0).Padding(8, 12).Radius(8).Border(1, hairline(t)).Background(t.Surface).Gap(6).Children(func() {
+				ui.Text(c, e.Text).FontSize(14).LineHeight(1.5).Selectable()
 				details()
 			})
 		})
 	case "tool", "thought", "plan":
 		v.activity(c, threadID, e)
 	default:
-		ui.Text(c, e.Text).Selectable().FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, e.Text).Selectable().FontSize(12.5).TextColor(t.TextMuted)
 	}
 }
 
@@ -719,14 +721,18 @@ func (v *View) activity(c *ui.Context, threadID string, e state.Entry) {
 		label = "Tool call"
 	}
 	p := ui.CollapsibleBase(c, v.disclosure(threadID+e.ID))
-	trigger := p.Trigger.Transition(colorMotion).Label(label).AlignSelf(ui.Start).MinWidth(0).Padding(3, 8, 3, 4).Radius(6).Gap(6)
-	if trigger.Hovered() {
-		trigger.Background(t.SurfaceHover)
+	trigger := p.Trigger.Transition(colorMotion).Label(label).AlignSelf(ui.Start).MinWidth(0).Height(26).Padding(0, 8, 0, 4).Radius(5).Gap(7)
+	hovered := trigger.Hovered()
+	if hovered {
+		trigger.Background(t.Text.Alpha(0.045))
 	}
 	trigger.Children(func() {
-		ui.Icon(c, disclosure).Size(12, 12).TextColor(t.TextMuted).Rotate(90 * p.Progress()).Shrink(0)
+		ui.Icon(c, disclosure).Size(11, 11).TextColor(faint(t)).Rotate(90 * p.Progress()).Shrink(0)
 		ui.Icon(c, icon).Size(14, 14).TextColor(t.TextMuted).Shrink(0)
-		ui.Text(c, label).FontSize(12.5).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0)
+		text := ui.Text(c, label).FontSize(13).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0)
+		if hovered {
+			text.TextColor(t.Text)
+		}
 		if e.Status != "" {
 			status := strings.ReplaceAll(e.Status, "_", " ")
 			color := t.TextMuted
@@ -747,9 +753,9 @@ func (v *View) activity(c *ui.Context, threadID string, e state.Entry) {
 			markdown.View(c, e.Text, &v.md)
 		case e.Text == "":
 		case e.Role == "tool":
-			ui.Text(c, e.Text).Selectable().Font("monospace").FontSize(11.5).Padding(8, 10).Radius(6).Background(t.Surface)
+			ui.Text(c, e.Text).Selectable().Font("monospace").FontSize(12).Padding(8, 10).Radius(6).Border(1, t.Border).Background(t.Surface)
 		default:
-			ui.Text(c, e.Text).Selectable().FontSize(12.5).TextColor(t.TextMuted)
+			ui.Text(c, e.Text).Selectable().FontSize(13).LineHeight(1.5).TextColor(t.TextMuted)
 		}
 		if e.Details != "" {
 			smallDisclosure(c, "Tool / protocol details", v.disclosure("details"+threadID+e.ID), func() {
@@ -762,19 +768,19 @@ func (v *View) activity(c *ui.Context, threadID string, e state.Entry) {
 func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 	t := c.Theme()
 	ui.Row(c.Key(p.ID)).Shrink(0).Justify(ui.Center).Padding(0, 24, 8, 24).Children(func() {
-		ui.Column(c).Grow(1).MaxWidth(readingWidth).MinWidth(0).Padding(12, 14).Gap(10).Radius(10).Border(1, warnColor(t).Alpha(0.55)).Background(t.Surface).Children(func() {
+		ui.Column(c).Grow(1).MaxWidth(readingWidth).MinWidth(0).Padding(12, 14).Gap(10).Radius(8).Border(1, hairline(t)).Background(t.Surface).Children(func() {
 			title := "Permission needed"
 			if p.Request.ToolCall.Title != nil {
 				title += " for " + *p.Request.ToolCall.Title
 			}
 			ui.Row(c).Gap(8).Children(func() {
 				ui.Icon(c, warningIcon).Size(15, 15).TextColor(warnColor(t))
-				ui.Text(c, title).FontSize(13).FontWeight(600).Grow(1).MinWidth(0)
+				ui.Text(c, title).FontSize(13).FontWeight(500).Grow(1).MinWidth(0)
 			})
 			if p.Request.ToolCall.RawInput != nil || len(p.Request.ToolCall.Content) > 0 || len(p.Request.ToolCall.Locations) > 0 {
 				b, _ := json.MarshalIndent(p.Request.ToolCall, "", "  ")
-				ui.Scroll(c).MaxHeight(120).Radius(6).Background(t.Background).Padding(8, 10).Children(func() {
-					ui.Text(c, string(b)).Selectable().Font("monospace").FontSize(11.5)
+				ui.Scroll(c).MaxHeight(120).Radius(6).Border(1, t.Border).Background(t.Background).Padding(8, 10).Children(func() {
+					ui.Text(c, string(b)).Selectable().Font("monospace").FontSize(11.5).TextColor(t.TextMuted)
 				})
 			}
 			ui.Row(c).Gap(8).Wrap().Children(func() {
@@ -797,9 +803,10 @@ func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 
 func (v *View) errorBox(c *ui.Context, text string, actions ...func()) {
 	t := c.Theme()
-	ui.Row(c).Shrink(0).Margin(8, 16, 0, 16).Padding(8, 8, 8, 12).Gap(10).Radius(8).Background(t.Background.Mix(t.Danger, 0.1)).Border(1, t.Danger.Alpha(0.25)).Children(func() {
+	ui.Row(c).Shrink(0).Margin(8, 16, 0, 16).Padding(6, 6, 6, 12).Gap(10).Radius(6).Background(t.Danger.Alpha(0.07)).Border(1, t.Danger.Alpha(0.22)).Children(func() {
+		dot(c, t.Danger).Size(6, 6)
 		ui.Scroll(c).Grow(1).MinWidth(0).MaxHeight(96).Children(func() {
-			ui.Text(c, text).TextColor(t.Danger).Selectable().FontSize(12)
+			ui.Text(c, text).Selectable().FontSize(12.5)
 		})
 		for _, action := range actions {
 			action()

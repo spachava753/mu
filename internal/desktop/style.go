@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/egoist/mygo/ui/markdown"
 )
 
 // Layout constants shared by the native view and its tests.
@@ -16,54 +17,77 @@ const (
 	readingWidth = 800
 )
 
-// Matte, opaque surfaces follow the desktop's light/dark preference. No glass,
-// gradients or shadows; focus keeps a distinct, accessible outline.
+// The look follows Linear's published approach: a near-monochrome theme
+// with low chroma, hairline borders, layered neutral surfaces, compact
+// medium-weight type, and the accent reserved for focus, selection and the
+// one primary action. The content area is an inset panel on darker chrome.
+// Surfaces stay opaque and matte; focus keeps a distinct, accessible outline.
 func matte(c *ui.Context) {
 	t := *c.Theme()
-	t.Radius, t.Spacing = 6, 3.5
+	t.Radius, t.Spacing, t.FontSize = 6, 3.5, 13
 	if !c.Preferences().HighContrast {
 		if t.Dark {
-			t.Background, t.Surface = ui.Hex("#17181b"), ui.Hex("#1d1e22")
-			t.SurfaceHover, t.SurfacePressed, t.Border = ui.Hex("#26272c"), ui.Hex("#2f3036"), ui.Hex("#2c2d33")
-			t.Text, t.TextMuted = ui.Hex("#e9eaee"), ui.Hex("#9c9ea8")
-			t.Accent, t.AccentHover, t.AccentPressed, t.AccentText = ui.Hex("#8cb4f5"), ui.Hex("#a4c4f8"), ui.Hex("#7aa3e6"), ui.Hex("#0f1420")
-			t.Focus, t.Selection = ui.Hex("#8cb4f5"), ui.Hex("#2e3c58")
-			t.Danger = ui.Hex("#f28b82")
+			t.Background, t.Surface = ui.Hex("#141517"), ui.Hex("#1a1b1e")
+			t.SurfaceHover, t.SurfacePressed, t.Border = ui.Hex("#1f2023"), ui.Hex("#25262a"), ui.Hex("#27282c")
+			t.Text, t.TextMuted = ui.Hex("#e3e4e8"), ui.Hex("#8b8e96")
+			t.Accent, t.AccentHover, t.AccentPressed, t.AccentText = ui.Hex("#5e6ad2"), ui.Hex("#6b77dc"), ui.Hex("#5560c4"), ui.Hex("#ffffff")
+			t.Focus, t.Selection = ui.Hex("#7170ff"), ui.Hex("#2c2f5a")
+			t.Danger = ui.Hex("#eb5757")
 		} else {
-			t.Background, t.Surface = ui.Hex("#ffffff"), ui.Hex("#f6f7f9")
-			t.SurfaceHover, t.SurfacePressed, t.Border = ui.Hex("#eceef2"), ui.Hex("#e2e5ea"), ui.Hex("#e0e2e7")
-			t.Text, t.TextMuted = ui.Hex("#1d2026"), ui.Hex("#5f6671")
-			t.Accent, t.AccentHover, t.AccentPressed, t.AccentText = ui.Hex("#2f6bd8"), ui.Hex("#2860c4"), ui.Hex("#2152a8"), ui.Hex("#ffffff")
-			t.Focus, t.Selection = ui.Hex("#2f6bd8"), ui.Hex("#d5e2fa")
-			t.Danger = ui.Hex("#c5221f")
+			t.Background, t.Surface = ui.Hex("#ffffff"), ui.Hex("#fbfbfc")
+			t.SurfaceHover, t.SurfacePressed, t.Border = ui.Hex("#f1f2f4"), ui.Hex("#e9eaed"), ui.Hex("#e4e5e9")
+			t.Text, t.TextMuted = ui.Hex("#1f2023"), ui.Hex("#6b6f76")
+			t.Accent, t.AccentHover, t.AccentPressed, t.AccentText = ui.Hex("#5e6ad2"), ui.Hex("#5561c7"), ui.Hex("#4c57b8"), ui.Hex("#ffffff")
+			t.Focus, t.Selection = ui.Hex("#5e6ad2"), ui.Hex("#dfe1f7")
+			t.Danger = ui.Hex("#d93f3f")
 		}
 		t.Inverse, t.InverseText = t.SurfacePressed, t.Text
 	}
 	c.SetTheme(&t)
-	c.Root().Background(t.Background)
+	c.Root().Background(chrome(c))
 }
 
-// Status colors complement the theme. They mark state only; text stays
-// legible in the theme's own text colors.
+// chrome is the darker frame around the content panel: the sidebar and the
+// window edges.
+func chrome(c *ui.Context) ui.Color {
+	t := c.Theme()
+	if c.Preferences().HighContrast {
+		return t.Background
+	}
+	if t.Dark {
+		return ui.Hex("#0d0e10")
+	}
+	return ui.Hex("#f4f5f8")
+}
+
+// faint is the quietest text: timestamps, counts and hints.
+func faint(t *ui.Theme) ui.Color { return t.TextMuted.Mix(t.Background, 0.3) }
+
+// hairline is a border a step stronger than the theme's, for controls.
+func hairline(t *ui.Theme) ui.Color { return t.Border.Mix(t.Text, 0.06) }
+
+// Status colors mark state only; text stays in the theme's text colors.
 func okColor(t *ui.Theme) ui.Color {
 	if t.Dark {
-		return ui.Hex("#7fc796")
+		return ui.Hex("#4cb782")
 	}
-	return ui.Hex("#1e7d3e")
+	return ui.Hex("#2f9e6a")
 }
 func warnColor(t *ui.Theme) ui.Color {
 	if t.Dark {
-		return ui.Hex("#e8c26b")
+		return ui.Hex("#f2c94c")
 	}
-	return ui.Hex("#a3670a")
+	return ui.Hex("#c48a00")
 }
 
-// userBubble distinguishes the user's prompts from agent prose.
-func userBubble(t *ui.Theme) ui.Color {
-	if t.Dark {
-		return t.Background.Mix(t.Accent, 0.11)
+// markdownTheme sizes agent prose for reading and keeps headings modest.
+func markdownTheme(t *ui.Theme) *markdown.Theme {
+	th := &markdown.Theme{FontSize: 14, LineHeight: 1.55, StrongWeight: 600, CodeBlockBackground: t.Surface, CodeBlockBorder: t.Border, CodeBlockRadius: 6}
+	sizes := [6]float32{1.3, 1.18, 1.07, 1, 0.95, 0.9}
+	for i := range th.Headings {
+		th.Headings[i] = markdown.HeadingStyle{Size: sizes[i], Weight: 600, Color: t.Text, Top: 1.2, Bottom: 0.45}
 	}
-	return t.Background.Mix(t.Accent, 0.07)
+	return th
 }
 
 func svg(path string) *ui.SVG {
@@ -100,14 +124,18 @@ func iconButton(c *ui.Context, label string, icon *ui.SVG) ui.Element {
 
 func iconAction(c *ui.Context, label string, icon *ui.SVG, disabled bool) ui.Element {
 	t := c.Theme()
-	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).Tooltip(label).Size(28, 28).Radius(6).Shrink(0).Disabled(disabled)
-	if b.Hovered() && !disabled {
-		b.Background(t.SurfaceHover)
+	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).Tooltip(label).Size(26, 26).Radius(5).Shrink(0).Disabled(disabled)
+	hovered := b.Hovered() && !disabled
+	if hovered {
+		b.Background(t.Text.Alpha(0.06))
 	}
 	b.Children(func() {
-		icon := ui.Icon(c, icon).Size(16, 16).TextColor(t.TextMuted)
-		if disabled {
-			icon.Opacity(0.4)
+		icon := ui.Icon(c, icon).Size(15, 15).TextColor(t.TextMuted)
+		switch {
+		case disabled:
+			icon.Opacity(0.35)
+		case hovered:
+			icon.TextColor(t.Text)
 		}
 	})
 	return b
@@ -116,11 +144,14 @@ func iconAction(c *ui.Context, label string, icon *ui.SVG, disabled bool) ui.Ele
 // navRow is a full-width sidebar destination with an icon.
 func navRow(c *ui.Context, label string, icon *ui.SVG, active bool) ui.Element {
 	t := c.Theme()
-	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).FillWidth().Padding(6, 8).Radius(6).Gap(9)
-	b.Background(rowColor(t, active, b.Hovered()))
+	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).FillWidth().Height(28).Padding(0, 8).Radius(5).Gap(9)
+	b.Background(sideColor(t, active, b.Hovered()))
 	b.Children(func() {
-		ui.Icon(c, icon).Size(15, 15).TextColor(t.TextMuted)
-		ui.Text(c, label).FontSize(12.5).SingleLine().Grow(1).MinWidth(0)
+		ui.Icon(c, icon).Size(14, 14).TextColor(t.TextMuted)
+		text := ui.Text(c, label).FontSize(13).FontWeight(500).TextColor(t.TextMuted).SingleLine().Grow(1).MinWidth(0)
+		if active || b.Hovered() {
+			text.TextColor(t.Text)
+		}
 	})
 	return b
 }
@@ -129,30 +160,52 @@ func navRow(c *ui.Context, label string, icon *ui.SVG, active bool) ui.Element {
 func quietButton(c *ui.Context, text string) ui.Element {
 	t := c.Theme()
 	b := ui.ButtonBase(c).Transition(colorMotion).Label(text).Padding(3, 7).Radius(5).Shrink(0)
+	label := t.TextMuted
 	if b.Hovered() {
-		b.Background(t.SurfaceHover)
+		b.Background(t.Text.Alpha(0.06))
+		label = t.Text
 	}
-	b.Children(func() { ui.Text(c, text).FontSize(11.5).TextColor(t.TextMuted).SingleLine() })
+	b.Children(func() { ui.Text(c, text).FontSize(12).FontWeight(500).TextColor(label).SingleLine() })
 	return b
 }
 
-func rowColor(t *ui.Theme, selected, hovered bool) ui.Color {
-	if selected {
-		base := t.Surface.Mix(t.Accent, 0.13)
-		if hovered {
-			return base.Mix(t.Accent, 0.05)
-		}
-		return base
+// sideColor is the background of a row on the chrome: transparent until
+// hovered, a neutral layer when selected. The accent is not used here.
+func sideColor(t *ui.Theme, selected, hovered bool) ui.Color {
+	switch {
+	case selected && hovered:
+		return t.Text.Alpha(0.1)
+	case selected:
+		return t.Text.Alpha(0.075)
+	case hovered:
+		return t.Text.Alpha(0.045)
 	}
-	if hovered {
-		return t.SurfaceHover
-	}
-	return t.Surface
+	return ui.Transparent
 }
 
-// chip is a small status label, tinted by color.
+// rowColor is the background of a row inside the content panel.
+func rowColor(t *ui.Theme, selected, hovered bool) ui.Color {
+	switch {
+	case selected && hovered:
+		return t.Text.Alpha(0.075)
+	case selected:
+		return t.Text.Alpha(0.055)
+	case hovered:
+		return t.Text.Alpha(0.035)
+	}
+	return ui.Transparent
+}
+
+// chip is a small outlined label. A color other than the muted text color
+// adds a status dot.
 func chip(c *ui.Context, text string, color ui.Color) ui.Element {
-	return ui.Text(c, text).FontSize(10.5).FontWeight(600).TextColor(color).Padding(1, 6).Radius(4).Background(color.Alpha(0.13)).SingleLine().Shrink(0)
+	t := c.Theme()
+	return ui.Row(c).Shrink(0).Gap(5).Padding(1, 6).Radius(4).Border(1, hairline(t)).Children(func() {
+		if color != t.TextMuted {
+			dot(c, color).Size(6, 6)
+		}
+		ui.Text(c, text).FontSize(11).FontWeight(500).TextColor(t.TextMuted).SingleLine()
+	})
 }
 
 func dot(c *ui.Context, color ui.Color) ui.Element {
@@ -166,11 +219,11 @@ func smallDisclosure(c *ui.Context, label string, open *bool, fn func()) {
 		p := ui.CollapsibleBase(c, open)
 		trigger := p.Trigger.Transition(colorMotion).Label(label).AlignSelf(ui.Start).Padding(2, 8, 2, 2).Radius(5).Gap(5)
 		if trigger.Hovered() {
-			trigger.Background(t.SurfaceHover)
+			trigger.Background(t.Text.Alpha(0.05))
 		}
 		trigger.Children(func() {
-			ui.Icon(c, disclosure).Size(11, 11).TextColor(t.TextMuted).Rotate(90 * p.Progress())
-			ui.Text(c, label).FontSize(11.5).TextColor(t.TextMuted).SingleLine()
+			ui.Icon(c, disclosure).Size(11, 11).TextColor(faint(t)).Rotate(90 * p.Progress())
+			ui.Text(c, label).FontSize(12).TextColor(t.TextMuted).SingleLine()
 		})
 		p.Panel(fn).Padding(4, 0, 2, 18)
 	})
@@ -179,28 +232,28 @@ func smallDisclosure(c *ui.Context, label string, open *bool, fn func()) {
 // detailText shows raw protocol data as selectable monospace text.
 func detailText(c *ui.Context, text string) ui.Element {
 	t := c.Theme()
-	return ui.Text(c, text).Selectable().Font("monospace").FontSize(11).TextColor(t.TextMuted).Padding(8, 10).Radius(6).Background(t.Surface)
+	return ui.Text(c, text).Selectable().Font("monospace").FontSize(11.5).TextColor(t.TextMuted).Padding(8, 10).Radius(6).Background(t.Surface).Border(1, t.Border)
 }
 
 // field groups a label, its control and an optional hint.
 func field(c *ui.Context, label, hint string, control func()) {
 	ui.Column(c).Gap(6).Children(func() {
-		ui.Text(c, label).FontSize(12).FontWeight(600)
+		ui.Text(c, label).FontSize(12).FontWeight(500)
 		control()
 		if hint != "" {
-			ui.Text(c, hint).FontSize(11.5).TextColor(c.Theme().TextMuted)
+			ui.Text(c, hint).FontSize(12).TextColor(c.Theme().TextMuted)
 		}
 	})
 }
 
-// screenHeader is the compact title bar shared by the full-page screens.
+// screenHeader is the compact one-line title bar shared by every screen.
 func screenHeader(c *ui.Context, title, subtitle string, actions func()) {
 	t := c.Theme()
-	ui.Row(c).Height(52).Shrink(0).Padding(0, 16, 0, 24).Gap(8).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Children(func() {
-		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-			ui.Text(c, title).FontSize(14.5).FontWeight(600).SingleLine()
+	ui.Row(c).Height(44).Shrink(0).Padding(0, 10, 0, 20).Gap(4).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Children(func() {
+		ui.Row(c).Grow(1).MinWidth(0).Gap(8).Margin(0, 8, 0, 0).Children(func() {
+			ui.Text(c, title).FontSize(13).FontWeight(500).SingleLine().Shrink(0).MaxWidthPercent(70)
 			if subtitle != "" {
-				ui.Text(c, subtitle).FontSize(11.5).TextColor(t.TextMuted).SingleLine().Tooltip(subtitle)
+				ui.Text(c, subtitle).FontSize(12.5).TextColor(faint(t)).SingleLine().Shrink(3).MinWidth(0).Tooltip(subtitle)
 			}
 		})
 		if actions != nil {
@@ -276,20 +329,23 @@ func selectControl(c *ui.Context, label, field string, value string, options []c
 	}
 	trigger := s.Trigger.Transition(colorMotion).Label(label).Disabled(disabled).MinWidth(0)
 	if compact {
-		trigger.Padding(4, 6, 4, 8).Radius(6).Gap(5).Shrink(1).MaxWidth(220).Tooltip(field + ": " + name)
+		trigger.Height(24).Padding(0, 5, 0, 7).Radius(5).Gap(5).Shrink(1).MaxWidth(220).Tooltip(field + ": " + name)
 		if trigger.Hovered() && !disabled {
-			trigger.Background(t.SurfaceHover)
+			trigger.Background(t.Text.Alpha(0.06))
 		}
 		trigger.Children(func() {
-			ui.Text(c, field).FontSize(12).TextColor(t.TextMuted).SingleLine().Shrink(0)
-			value := ui.Text(c, name).FontSize(12).SingleLine().Shrink(1).MinWidth(0)
+			ui.Text(c, field).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(0)
+			value := ui.Text(c, name).FontSize(12).FontWeight(500).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0)
 			if disabled {
 				value.TextColor(t.TextMuted)
 			}
 			ui.Icon(c, chevronIcon).Size(12, 12).TextColor(t.TextMuted).Shrink(0)
 		})
 	} else {
-		trigger.FillWidth().Padding(7, 10).Radius(6).Border(1, t.Border).Background(t.Background)
+		trigger.FillWidth().Padding(6, 10).Radius(6).Border(1, hairline(t)).Background(t.Surface)
+		if trigger.Hovered() && !disabled {
+			trigger.BorderColor(hairline(t).Mix(t.Text, 0.1))
+		}
 		trigger.Children(func() {
 			ui.Text(c, name).SingleLine().Grow(1).MinWidth(0)
 			ui.Icon(c, chevronIcon).Size(14, 14).TextColor(t.TextMuted)
@@ -305,21 +361,21 @@ func selectControl(c *ui.Context, label, field string, value string, options []c
 		if compact {
 			width = max(width, 220)
 		}
-		panel.Transition(popupMotion).Width(width).Padding(4).Radius(8).Border(1, t.Border).Background(t.Background)
+		panel.Transition(popupMotion).Width(width).Padding(4).Radius(8).Border(1, hairline(t)).Background(t.Surface)
 		ui.Scroll(c).Label(label + " choices").MaxHeight(min(300, max(48, room))).Children(func() {
 			group := ""
 			for _, o := range options {
 				if o.Group != "" && o.Group != group {
-					ui.Text(c, o.Group).Padding(8, 8, 4, 8).FontSize(11).FontWeight(600).TextColor(t.TextMuted)
+					ui.Text(c, o.Group).Padding(8, 8, 4, 8).FontSize(11.5).FontWeight(500).TextColor(faint(t))
 					group = o.Group
 				}
-				item := s.Item(o.ID).Transition(colorMotion).Label(o.Name).Padding(6, 8).Radius(5).Gap(8).Tooltip(o.Description)
+				item := s.Item(o.ID).Transition(colorMotion).Label(o.Name).Height(30).Padding(0, 8).Radius(5).Gap(8).Tooltip(o.Description)
 				if item.Highlighted() {
-					item.Background(t.SurfaceHover)
+					item.Background(t.Text.Alpha(0.06))
 				}
 				item.Children(func() {
 					ui.Text(c, o.Name).SingleLine().Grow(1).MinWidth(0)
-					check := ui.Icon(c, checkIcon).Size(14, 14).TextColor(t.Accent)
+					check := ui.Icon(c, checkIcon).Size(14, 14).TextColor(t.TextMuted)
 					if o.ID != value {
 						check.Opacity(0)
 					}

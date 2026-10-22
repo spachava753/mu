@@ -15,7 +15,7 @@ func usageColor(t *ui.Theme, fraction float32) ui.Color {
 	case fraction >= 0.7:
 		return warnColor(t)
 	}
-	return t.Accent
+	return t.TextMuted
 }
 
 // Keep the context window visible beside the draft, not buried in settings.
@@ -25,33 +25,33 @@ func (v *View) usageLine(c *ui.Context, thread app.ThreadView, hint bool) {
 	ui.Row(c).Padding(0, 2).Gap(10).Children(func() {
 		indicator := ui.ButtonBase(c).Transition(colorMotion).Label("Context usage").Tooltip("Context window usage · click for token details").Padding(3, 6).Radius(5).Gap(8).Shrink(0)
 		if indicator.Hovered() || v.usageOpen {
-			indicator.Background(t.SurfaceHover)
+			indicator.Background(t.Text.Alpha(0.05))
 		}
 		indicator.Children(func() {
 			if u := s.Usage; u != nil && u.Size > 0 {
 				target := float32(min(1, max(0, float64(u.Used)/float64(u.Size))))
 				fill := indicator.AnimateTo("context-fill", target, sidebarMotion)
-				ui.Box(c).Label("Context window usage").Width(48).Height(4).Radius(2).Background(t.Border).Children(func() {
-					ui.Box(c).Width(48 * fill).Height(4).Radius(2).Background(usageColor(t, target))
+				ui.Box(c).Label("Context window usage").Width(40).Height(4).Radius(2).Background(t.Text.Alpha(0.1)).Children(func() {
+					ui.Box(c).Width(40 * fill).Height(4).Radius(2).Background(usageColor(t, target))
 				})
 			}
 			label := "Context not reported"
 			if s.Usage != nil {
 				label = contextLabel(s.Usage)
 			}
-			ui.Text(c, label).FontSize(11.5).TextColor(t.TextMuted).SingleLine()
+			ui.Text(c, label).FontSize(12).TextColor(faint(t)).SingleLine()
 		}).OnClick(func() { v.usageOpen = !v.usageOpen })
 		if u := s.Usage; u != nil && u.Cost != nil {
-			ui.Text(c, fmt.Sprintf("Cost %s %.4f", u.Cost.Currency, u.Cost.Amount)).FontSize(11.5).TextColor(t.TextMuted).SingleLine().Shrink(0)
+			ui.Text(c, fmt.Sprintf("Cost %s %.4f", u.Cost.Currency, u.Cost.Amount)).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(0)
 		}
 		ui.Spacer(c)
 		if hint {
-			ui.Text(c, "Enter to send · Shift+Enter for a new line").FontSize(11).TextColor(t.TextMuted.Alpha(0.75)).SingleLine().Shrink(1).MinWidth(0)
+			ui.Text(c, "Enter to send · Shift+Enter for a new line").FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
 		}
 		ui.PopoverBase(c, indicator, &v.usageOpen, func(panel ui.Element) {
-			panel.Transition(popupMotion).AttachTo(indicator, ui.AnchorTopStart, ui.AnchorBottomStart).Width(320).Margin(0, 0, 6, 0).Padding(12, 14).Radius(8).Border(1, t.Border).Background(t.Background)
+			panel.Transition(popupMotion).AttachTo(indicator, ui.AnchorTopStart, ui.AnchorBottomStart).Width(320).Margin(0, 0, 6, 0).Padding(12, 14).Radius(8).Border(1, hairline(t)).Background(t.Surface)
 			ui.Scroll(c).MaxHeight(280).Gap(10).Children(func() {
-				ui.Text(c, "Token usage").FontSize(13).FontWeight(600)
+				ui.Text(c, "Token usage").FontSize(13).FontWeight(500)
 				row := func(name, value string) {
 					ui.Row(c).Gap(12).Children(func() {
 						ui.Text(c, name).FontSize(12).TextColor(t.TextMuted).Grow(1)
@@ -68,7 +68,7 @@ func (v *View) usageLine(c *ui.Context, thread app.ThreadView, hint bool) {
 				}
 				if u := s.TurnUsage; u != nil {
 					ui.Column(c).Gap(5).Padding(8, 0, 0, 0).BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Children(func() {
-						ui.Text(c, "Last turn").FontSize(11).FontWeight(600).TextColor(t.TextMuted).Margin(0, 0, 2, 0)
+						ui.Text(c, "Last turn").FontSize(12).FontWeight(500).TextColor(faint(t)).Margin(0, 0, 2, 0)
 						row("Input", count(u.InputTokens))
 						row("Output", count(u.OutputTokens))
 						if u.ThoughtTokens != nil {
