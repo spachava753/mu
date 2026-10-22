@@ -19,7 +19,7 @@ This is intentionally a single-window, text-chat client. Configure authenticatio
 
 Mu requires `loadSession: true` and `sessionCapabilities.list`, `.resume`, `.close`, and `.fork` in the initialization response, in addition to the baseline ACP methods. An agent missing any required capability is rejected with an error naming the missing methods. Mu does not compensate by saving transcripts, injecting context, or creating replacement sessions. Native forking uses the SDK’s currently unstable `session/fork` API and is part of this required contract. Agent-side deletion is not a Mu feature.
 
-Mu currently speaks ACP v1: `session/load` restores and replays history; `session/resume` restores without replay and is used for native fork preparation. These methods are not interchangeable. ACP v2 is not yet supported.
+Mu currently speaks ACP v1: `session/load` restores and replays history; `session/resume` restores without replay. These methods are not interchangeable. Mu currently uses only `session/load`, but still requires `session/resume` at initialization. ACP v2 is not yet supported.
 
 ## Run
 
@@ -81,7 +81,7 @@ Choose **Import sessions** in the sidebar, select a saved agent and an existing 
 - A load error keeps the existing reference and shows **Retry connection** beside the error. Mu never creates a replacement session automatically. **Reload history** closes the connection and replaces the view with a fresh replay, including external changes.
 - **Archive** hides a thread from the active list and closes its idle agent session. **Show archived → Restore** loads it again.
 - **Remove from Mu** requires confirmation and removes only Mu's reference. It does not call agent-side deletion or remove workspace files. The session can be imported again.
-- **Fork** uses the agent's native fork method. Mu resumes the source without replay on a temporary connection, requests a fork, closes both sessions on that connection, and saves the new reference. Opening it loads its history from the agent. No transcript is copied or supplied as a prompt; workspace files are not rolled back.
+- **Fork** sends ACP `session/fork` on the source thread's own connection, connecting it first if needed; the agent creates the fork. The source stays connected and unchanged. Because each thread has its own agent process, Mu then closes the fork on the source's connection and saves the new reference; opening it loads its history from the agent. No transcript is copied or supplied as a prompt; workspace files are not rolled back.
 - Shutdown and detached teardown request `session/close` before terminating a live session's process. A close failure is surfaced; a two-second deadline prevents an unresponsive agent from blocking cleanup indefinitely.
 - Another client can still use an imported session. Mu prevents conflicting local operations on the same managed reference, but does not promise cross-client locking.
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +197,7 @@ func TestDiscoveryErrorsAndStaleImport(t *testing.T) {
 	}
 }
 
-func TestReloadReplacesProjectionAndNativeForkUsesResume(t *testing.T) {
+func TestReloadReplacesProjectionAndNativeForkUsesSourceConnection(t *testing.T) {
 	command := testutil.Agent(t)
 	a := openTest(t, t.TempDir())
 	id := createTest(t, a, command)
@@ -218,25 +219,57 @@ func TestReloadReplacesProjectionAndNativeForkUsesResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One session/fork on the source's own connection, then the fork is
+	// released there. No extra process, resume, replay or prompt, and the
+	// source session is not closed.
 	calls := fixtureCalls(t, command)[before:]
-	resume, native, closes := false, false, 0
-	for _, call := range calls {
-		switch call {
-		case "session/resume":
-			resume = true
-		case "session/fork":
-			native = true
-		case "session/close":
-			closes++
-		case "session/prompt", "session/load":
-			t.Fatal("fork copied or unnecessarily replayed conversation", calls)
-		}
+	if !slices.Equal(calls, []string{"session/fork", "session/close"}) {
+		t.Fatal("unexpected fork lifecycle", calls)
 	}
-	if !resume || !native || closes != 3 {
-		t.Fatal("fork lifecycle missing", calls)
+	s := a.Snapshot()
+	if s.LifecycleError != "" {
+		t.Fatal("fork reported a lifecycle error:", s.LifecycleError)
+	}
+	source := findThread(t, a, id)
+	if !source.Connected || source.Configuring || source.SessionError != "" || source.SessionID != first.SessionID {
+		t.Fatal("fork disturbed the source thread", source)
+	}
+	if v := sendDone(t, a, id, "after fork"); lastText(v) != "Echo: after fork" {
+		t.Fatal("source unusable after fork", v)
 	}
 	if findThread(t, a, fork).SessionID == first.SessionID {
 		t.Fatal("fork reused session ID")
+	}
+	if v := sendDone(t, a, fork, "in fork"); len(v.Entries) != 4 || v.Entries[0].Text != "first" || lastText(v) != "Echo: in fork" {
+		t.Fatal("fork did not load agent history", v.Entries)
+	}
+}
+
+func TestForkConnectsDisconnectedSource(t *testing.T) {
+	dir := t.TempDir()
+	command := testutil.Agent(t)
+	a := openTest(t, dir)
+	id := createTest(t, a, command)
+	sendDone(t, a, id, "before restart")
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a = openTest(t, dir)
+	if findThread(t, a, id).Connected {
+		t.Fatal("source unexpectedly connected")
+	}
+	fork, err := a.Fork(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := a.Snapshot(); s.LifecycleError != "" {
+		t.Fatal(s.LifecycleError)
+	}
+	if source := findThread(t, a, id); !source.Connected || len(source.Entries) != 2 {
+		t.Fatal("source was not connected and loaded for the fork", source)
+	}
+	if v := sendDone(t, a, fork, "branch"); len(v.Entries) != 4 || v.Entries[0].Text != "before restart" {
+		t.Fatal("fork lost context", v.Entries)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -139,6 +140,9 @@ func listSaved(id json.RawMessage, cursor string) {
 		result["nextCursor"] = "repeated"
 	}
 	reply(id, result)
+}
+func notOpen(id json.RawMessage, session string) {
+	send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": fmt.Sprintf("session %q is not open", session)}})
 }
 func missing(id json.RawMessage) {
 	send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "session not found"}})

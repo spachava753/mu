@@ -141,12 +141,12 @@ func (v *View) Draw(c *ui.Context) {
 		select {
 		case result := <-v.forkResult:
 			v.forkResult = nil
-			if result.err != nil {
-				v.fail(result.err)
-			} else {
+			// A saved fork opens even if releasing it from the source failed.
+			if result.id != "" {
 				v.archived = false
 				v.selectThread(result.id)
 			}
+			v.fail(result.err)
 		default:
 		}
 	}

@@ -23,8 +23,8 @@ func waitCall(t *testing.T, command, method string) {
 	t.Fatal("fixture never received", method)
 }
 
-func TestShutdownCancelsDiscoveryAndResume(t *testing.T) {
-	for _, operation := range []string{"list", "resume"} {
+func TestShutdownCancelsDiscoveryAndFork(t *testing.T) {
+	for _, operation := range []string{"list", "fork"} {
 		t.Run(operation, func(t *testing.T) {
 			command := testutil.Agent(t)
 			a := openTest(t, t.TempDir())
@@ -44,7 +44,7 @@ func TestShutdownCancelsDiscoveryAndResume(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				id := createTest(t, a, command+" wait-resume")
+				id := createTest(t, a, command+" wait-fork")
 				connected(t, a, id)
 				finished := make(chan error, 1)
 				go func() { _, err := a.Fork(id); finished <- err }()

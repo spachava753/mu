@@ -47,6 +47,9 @@ func main() {
 	scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 	var pending json.RawMessage
 	var session, waiting string
+	// Sessions open on this connection. Like real agents, close and fork
+	// reject sessions that are not open here.
+	open := map[string]bool{}
 	for scanner.Scan() {
 		var m message
 		if json.Unmarshal(scanner.Bytes(), &m) != nil {
@@ -93,6 +96,7 @@ func main() {
 			active.AdditionalDirectories = p.AdditionalDirectories
 			save(active)
 			session = active.ID
+			open[session] = true
 			result := map[string]any{"sessionId": session}
 			if withOptions {
 				initialState(session)
@@ -108,6 +112,11 @@ func main() {
 			}
 			listSaved(m.ID, p.Cursor)
 		case "session/close":
+			if !open[p.SessionID] {
+				notOpen(m.ID, p.SessionID)
+				continue
+			}
+			delete(open, p.SessionID)
 			if slices.Contains(os.Args, "slow-close") {
 				time.Sleep(150 * time.Millisecond)
 				update(p.SessionID, "agent_message_chunk", "late close notification")
@@ -126,6 +135,13 @@ func main() {
 			recording = false
 			reply(m.ID, map[string]any{})
 		case "session/fork":
+			if slices.Contains(os.Args, "wait-fork") {
+				continue
+			}
+			if !open[p.SessionID] {
+				notOpen(m.ID, p.SessionID)
+				continue
+			}
 			source, err := load(p.SessionID)
 			if err != nil {
 				missing(m.ID)
@@ -135,6 +151,7 @@ func main() {
 			fork.Updates = source.Updates
 			fork.AdditionalDirectories = p.AdditionalDirectories
 			save(fork)
+			open[fork.ID] = true
 			reply(m.ID, map[string]any{"sessionId": fork.ID})
 		case "session/load", "session/resume":
 			recording = false
@@ -147,9 +164,6 @@ func main() {
 			session = active.ID
 			if p.Cwd != active.Cwd || !slices.Equal(p.AdditionalDirectories, active.AdditionalDirectories) {
 				reject(m.ID)
-				continue
-			}
-			if m.Method == "session/resume" && slices.Contains(os.Args, "wait-resume") {
 				continue
 			}
 			if m.Method == "session/load" {
@@ -171,6 +185,7 @@ func main() {
 			if withOptions || legacy {
 				result["modes"] = modes(mode)
 			}
+			open[session] = true
 			reply(m.ID, result)
 		case "session/set_config_option":
 			if slices.Contains(os.Args, "wait-config") {
