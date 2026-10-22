@@ -2,29 +2,12 @@ package app
 
 import (
 	"errors"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
 )
-
-func (a *App) migrateSettings() {
-	if a.data.SettingsVersion != 0 {
-		return
-	}
-	a.data.SettingsVersion = 1
-	// This is a command the user already configured, never an agent default.
-	if a.data.LastCommand != "" && len(a.data.Agents) == 0 {
-		if args, err := agent.ParseCommand(a.data.LastCommand); err == nil {
-			config := state.AgentConfig{ID: state.ID(), Name: filepath.Base(args[0]), Command: a.data.LastCommand}
-			a.data.Agents = append(a.data.Agents, config)
-			a.data.DefaultAgentID = config.ID
-		}
-	}
-	a.dirty = true
-}
 
 func (a *App) SaveAgent(config state.AgentConfig, makeDefault bool) (string, error) {
 	config.Name, config.Command = strings.TrimSpace(config.Name), strings.TrimSpace(config.Command)

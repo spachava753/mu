@@ -90,6 +90,7 @@ func TestQAConversation(t *testing.T) {
 	if !tt.HasText("Permission needed for Run test command") {
 		t.Fatal("permission request is not visible")
 	}
+	screenshot(t, tt, "permission-1100")
 	click("Reject")
 	await(func(thread app.ThreadView) bool {
 		return !thread.Running && strings.Contains(lastText(thread), `"optionId":"no"`)
@@ -100,6 +101,7 @@ func TestQAConversation(t *testing.T) {
 
 	typeMessage("wait", false)
 	await(func(thread app.ThreadView) bool { return thread.Running && lastText(thread) == "Waiting" })
+	screenshot(t, tt, "running-1100")
 	click("Stop")
 	await(func(thread app.ThreadView) bool {
 		return !thread.Running && strings.HasPrefix(lastText(thread), "Stopped.")
@@ -129,7 +131,7 @@ func TestQAThreadControls(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			view := desktop.New(a, "qa-agent-not-started", t.TempDir())
+			view := desktop.New(a, testutil.Agent(t), t.TempDir())
 			tt := ui.NewTester(view.Draw, size[0], size[1])
 			tt.Frame()
 			click := func(label string) {
@@ -147,31 +149,64 @@ func TestQAThreadControls(t *testing.T) {
 			if !tt.HasText("Send a message to start the agent.") {
 				t.Fatal("empty-thread composer not visible")
 			}
+			click("Session options")
+			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+			click("Close options")
 			click("Fork")
+			waitView(t, a, tt, func(s app.Snapshot) bool {
+				for _, thread := range s.Threads {
+					if thread.ParentID != "" && thread.Connected && !thread.Configuring {
+						return true
+					}
+				}
+				return false
+			})
 			if len(a.Snapshot().Threads) != 2 {
 				t.Fatal("fork button did not create thread")
 			}
-			if !tt.HasText("Forked with transcript context. Agent-internal state and workspace files are not copied.") {
-				t.Fatal("portable fork warning not displayed")
-			}
 			click("Archive")
+			waitView(t, a, tt, func(s app.Snapshot) bool {
+				for _, thread := range s.Threads {
+					if thread.Configuring {
+						return false
+					}
+				}
+				return true
+			})
 			if !tt.HasText("Archived. Restore this thread to continue.") {
 				t.Fatal("archive left composer enabled")
 			}
 			click("Restore")
+			waitView(t, a, tt, func(s app.Snapshot) bool {
+				for _, thread := range s.Threads {
+					if thread.Configuring {
+						return false
+					}
+				}
+				return true
+			})
 			if _, ok := tt.Find("Message"); !ok {
 				t.Fatal("restore did not restore composer")
 			}
-			click("Delete")
-			if !tt.HasText("Delete this thread?") {
+			removeThread := func() {
+				t.Helper()
+				click("More thread actions")
+				if err := tt.ChooseMenuItem("Remove from Mu…"); err != nil {
+					t.Fatal(err)
+				}
+				tt.Frame()
+				tt.Advance(320 * time.Millisecond)
+			}
+			removeThread()
+			if !tt.HasText("Remove this thread from Mu?") {
 				t.Fatal("delete confirmation did not appear")
 			}
 			click("Keep thread")
 			if len(a.Snapshot().Threads) != 2 {
 				t.Fatal("cancelled deletion removed thread")
 			}
-			click("Delete")
-			click("Delete permanently")
+			removeThread()
+			click("Remove reference")
 			if len(a.Snapshot().Threads) != 1 {
 				t.Fatal("confirmed deletion did not remove fork")
 			}

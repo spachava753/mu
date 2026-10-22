@@ -110,7 +110,7 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 	appendChunk := func(role string, block acp.ContentBlock) {
 		if !r.acceptUpdates {
 			return
-		} // session/load replay must not duplicate history.
+		}
 		text := contentText(block)
 		if text == "" {
 			return
@@ -218,7 +218,7 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 	a.notifyLocked()
 }
 
-func toolEntry(t *state.Thread, id string) *state.Entry {
+func toolEntry(t *thread, id string) *state.Entry {
 	for i := len(t.Entries) - 1; i >= 0; i-- {
 		if t.Entries[i].Role == "tool" && t.Entries[i].ToolID == id {
 			return &t.Entries[i]
@@ -250,7 +250,7 @@ func planText(entries []acp.PlanEntry) string {
 	return b.String()
 }
 
-func setPlan(t *state.Thread, id, text, details string) {
+func setPlan(t *thread, id, text, details string) {
 	for i := range t.Entries {
 		if t.Entries[i].Role == "plan" && t.Entries[i].PlanID == id {
 			t.Entries[i].Text, t.Entries[i].Details = text, details

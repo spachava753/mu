@@ -110,8 +110,8 @@ func TestSessionOptionsAndAllUpdates(t *testing.T) {
 	}
 	a = openTest(t, dir)
 	v = findThread(t, a, id)
-	if v.Session.Usage == nil || v.Session.Usage.Cost.Currency != "EUR" || v.Session.TurnUsage == nil {
-		t.Fatal("usage not persisted")
+	if v.Session.Usage != nil || v.Session.TurnUsage != nil || len(v.Entries) != 0 {
+		t.Fatal("transient session state was persisted")
 	}
 	v = connected(t, a, id)
 	if len(v.Entries) != before {
@@ -135,7 +135,7 @@ func TestLegacyModes(t *testing.T) {
 	}
 }
 
-func TestPreparedForkKeepsContextAcrossRestart(t *testing.T) {
+func TestNativeForkAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	a := openTest(t, dir)
 	id := createTest(t, a, testutil.Agent(t)+" session-ui")
@@ -144,30 +144,16 @@ func TestPreparedForkKeepsContextAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := connected(t, a, fork)
-	if !v.NeedsContext {
-		t.Fatal("prepared fork lost pending context")
+	if len(findThread(t, a, fork).Entries) != 0 {
+		t.Fatal("copied local transcript")
 	}
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
 	a = openTest(t, dir)
-	v = sendDone(t, a, fork, "continue")
-	users := 0
-	for _, entry := range v.Entries {
-		if entry.Role == "user" {
-			users++
-		}
-	}
-	if users != 2 {
-		t.Fatal("fork context echo duplicated user entries", v.Entries)
-	}
-	if !strings.Contains(lastText(v), "remember original") || v.NeedsContext {
-		t.Fatal("fork context not supplied after reconnect", v)
-	}
-	v = sendDone(t, a, fork, "next")
-	if lastText(v) != "Echo: next" {
-		t.Fatal("bootstrap sent twice")
+	v := sendDone(t, a, fork, "continue")
+	if len(v.Entries) != 4 || v.Entries[0].Text != "remember original" || lastText(v) != "Echo: continue" {
+		t.Fatal("native fork did not load agent history", v.Entries)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 type message struct {
@@ -20,14 +21,22 @@ type message struct {
 
 var mu sync.Mutex
 
-func send(v any) { mu.Lock(); defer mu.Unlock(); _ = json.NewEncoder(os.Stdout).Encode(v) }
+func send(v any) {
+	mu.Lock()
+	defer mu.Unlock()
+	recordNotification(v)
+	_ = json.NewEncoder(os.Stdout).Encode(v)
+}
 func reply(id json.RawMessage, result any) {
 	send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
 func update(session, kind, text string) {
 	send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session, "update": map[string]any{"sessionUpdate": kind, "content": map[string]any{"type": "text", "text": text}}}})
 }
-func finish(id json.RawMessage, reason string) { reply(id, map[string]any{"stopReason": reason}) }
+func finish(id json.RawMessage, reason string) {
+	recording = false
+	reply(id, map[string]any{"stopReason": reason})
+}
 
 func main() {
 	noLoad := slices.Contains(os.Args, "no-load")
@@ -43,13 +52,16 @@ func main() {
 		if json.Unmarshal(scanner.Bytes(), &m) != nil {
 			continue
 		}
+		logCall(m)
 		var p struct {
-			SessionID          string          `json:"sessionId"`
-			Cwd                string          `json:"cwd"`
-			ConfigID           string          `json:"configId"`
-			Value              json.RawMessage `json:"value"`
-			ModeID             string          `json:"modeId"`
-			ClientCapabilities struct {
+			Cursor                string          `json:"cursor"`
+			AdditionalDirectories []string        `json:"additionalDirectories"`
+			SessionID             string          `json:"sessionId"`
+			Cwd                   string          `json:"cwd"`
+			ConfigID              string          `json:"configId"`
+			Value                 json.RawMessage `json:"value"`
+			ModeID                string          `json:"modeId"`
+			ClientCapabilities    struct {
 				Plan    *struct{} `json:"planCapabilities"`
 				Session struct {
 					ConfigOptions struct {
@@ -68,9 +80,19 @@ func main() {
 				reject(m.ID)
 				continue
 			}
-			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": !noLoad}, "agentInfo": map[string]any{"name": "test-agent", "version": "1"}})
+			caps := map[string]any{}
+			for _, name := range []string{"list", "resume", "close", "fork", "additionalDirectories"} {
+				if !slices.Contains(os.Args, "no-"+name) {
+					caps[name] = map[string]any{}
+				}
+			}
+			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": !noLoad, "sessionCapabilities": caps}, "agentInfo": map[string]any{"name": "test-agent", "version": "1"}})
 		case "session/new":
-			session = fmt.Sprintf("session-%d", os.Getpid())
+			recording = false
+			active = newSaved(p.Cwd)
+			active.AdditionalDirectories = p.AdditionalDirectories
+			save(active)
+			session = active.ID
 			result := map[string]any{"sessionId": session}
 			if withOptions {
 				initialState(session)
@@ -80,10 +102,67 @@ func main() {
 				result["modes"] = modes(mode)
 			}
 			reply(m.ID, result)
-		case "session/load":
-			session = p.SessionID
-			update(session, "user_message_chunk", "replayed user")
-			update(session, "agent_message_chunk", "replayed answer")
+		case "session/list":
+			if slices.Contains(os.Args, "wait-list") {
+				continue
+			}
+			listSaved(m.ID, p.Cursor)
+		case "session/close":
+			if slices.Contains(os.Args, "slow-close") {
+				time.Sleep(150 * time.Millisecond)
+				update(p.SessionID, "agent_message_chunk", "late close notification")
+			}
+			if slices.Contains(os.Args, "wait-close") {
+				continue
+			}
+			if slices.Contains(os.Args, "close-error") {
+				reject(m.ID)
+				continue
+			}
+			if pending != nil {
+				finish(pending, "cancelled")
+				pending = nil
+			}
+			recording = false
+			reply(m.ID, map[string]any{})
+		case "session/fork":
+			source, err := load(p.SessionID)
+			if err != nil {
+				missing(m.ID)
+				continue
+			}
+			fork := newSaved(p.Cwd)
+			fork.Updates = source.Updates
+			fork.AdditionalDirectories = p.AdditionalDirectories
+			save(fork)
+			reply(m.ID, map[string]any{"sessionId": fork.ID})
+		case "session/load", "session/resume":
+			recording = false
+			var err error
+			active, err = load(p.SessionID)
+			if err != nil {
+				missing(m.ID)
+				continue
+			}
+			session = active.ID
+			if p.Cwd != active.Cwd || !slices.Equal(p.AdditionalDirectories, active.AdditionalDirectories) {
+				reject(m.ID)
+				continue
+			}
+			if m.Method == "session/resume" && slices.Contains(os.Args, "wait-resume") {
+				continue
+			}
+			if m.Method == "session/load" {
+				if slices.Contains(os.Args, "wait-load") {
+					continue
+				}
+				if slices.Contains(os.Args, "partial-load-fail") {
+					update(session, "agent_message_chunk", "partial replay must not appear")
+					reject(m.ID)
+					continue
+				}
+				replay(active)
+			}
 			result := map[string]any{}
 			if withOptions {
 				initialState(session)
@@ -120,9 +199,16 @@ func main() {
 				text += b.Text
 			}
 			session = p.SessionID
+			if active == nil || active.ID != session {
+				missing(m.ID)
+				continue
+			}
+			savePrompt(text)
+			recording = true
 			switch text {
 			case "updates":
 				sessionUpdates(session)
+				recording = false
 				reply(m.ID, map[string]any{"stopReason": "end_turn", "usage": map[string]any{"totalTokens": 30, "inputTokens": 10, "outputTokens": 20, "thoughtTokens": 3, "cachedReadTokens": 5, "cachedWriteTokens": 2}})
 			case "exit":
 				fmt.Fprintln(os.Stderr, "test agent disconnected")

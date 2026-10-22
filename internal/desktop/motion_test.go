@@ -32,6 +32,7 @@ func sidebarWidth(t *testing.T, tt *ui.Tester) float32 {
 }
 
 func TestSidebarAnimationAndReversal(t *testing.T) {
+	const expanded, collapsed = 232, 48
 	a := testApp(t)
 	_, err := a.Create("unused-agent", t.TempDir())
 	if err != nil {
@@ -39,17 +40,17 @@ func TestSidebarAnimationAndReversal(t *testing.T) {
 	}
 	v := desktop.New(a, "", "")
 	tt := ui.NewTester(v.Draw, 800, 600)
-	if got := sidebarWidth(t, tt); got != 248 {
+	if got := sidebarWidth(t, tt); got != expanded {
 		t.Fatal("initial layout should not animate", got)
 	}
 	rawClick(t, tt, "Collapse sidebar")
-	if got := sidebarWidth(t, tt); got != 248 {
+	if got := sidebarWidth(t, tt); got != expanded {
 		t.Fatal("sidebar snapped at the start", got)
 	}
 	tt.Advance(90 * time.Millisecond)
 	tt.Frame() // Sample at Now(), not the last 60 Hz refresh before it.
 	mid := sidebarWidth(t, tt)
-	if mid <= 48 || mid >= 248 {
+	if mid <= collapsed || mid >= expanded {
 		t.Fatal("no intermediate sidebar width", mid)
 	}
 	rawClick(t, tt, "Expand sidebar")
@@ -57,16 +58,16 @@ func TestSidebarAnimationAndReversal(t *testing.T) {
 		t.Fatal("reversing snapped instead of continuing", mid, got)
 	}
 	tt.Advance(90 * time.Millisecond)
-	if got := sidebarWidth(t, tt); got <= mid || got >= 248 {
+	if got := sidebarWidth(t, tt); got <= mid || got >= expanded {
 		t.Fatal("reversal did not animate", got)
 	}
 	tt.Advance(300 * time.Millisecond)
-	if got := sidebarWidth(t, tt); got != 248 {
+	if got := sidebarWidth(t, tt); got != expanded {
 		t.Fatal("did not settle", got)
 	}
 	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
 	rawClick(t, tt, "Collapse sidebar")
-	if got := sidebarWidth(t, tt); got != 48 {
+	if got := sidebarWidth(t, tt); got != collapsed {
 		t.Fatal("ignored reduced motion", got)
 	}
 }

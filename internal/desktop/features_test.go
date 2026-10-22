@@ -177,6 +177,12 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 				t.Fatal("session title update not rendered")
 			}
 			screenshot(t, tt, fmt.Sprintf("matte-dark-%d", size[0]))
+			click(t, tt, "Read configuration")
+			if !tt.HasText("Configuration loaded.") {
+				t.Fatal("tool disclosure did not open")
+			}
+			click(t, tt, "Tool / protocol details")
+			screenshot(t, tt, fmt.Sprintf("tool-expanded-%d", size[0]))
 			tt.SetDark(false)
 			tt.Frame()
 			screenshot(t, tt, fmt.Sprintf("matte-light-%d", size[0]))

@@ -20,7 +20,7 @@ func main() {
 }
 
 func run() (err error) {
-	dataDir := flag.String("data-dir", "", "local history directory (default: $XDG_DATA_HOME/mu or ~/.local/share/mu)")
+	dataDir := flag.String("data-dir", "", "session reference directory (default: $XDG_DATA_HOME/mu or ~/.local/share/mu)")
 	command := flag.String("agent", "", "prefill the new-thread ACP command")
 	cwd := flag.String("cwd", "", "prefill the new-thread working directory")
 	flag.Parse()

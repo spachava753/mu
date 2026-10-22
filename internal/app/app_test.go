@@ -8,7 +8,6 @@ import (
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
-	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
 )
 
@@ -56,7 +55,7 @@ func sendDone(t *testing.T, a *App, id, text string) ThreadView {
 	if err := a.Send(id, text); err != nil {
 		t.Fatal(err)
 	}
-	return await(t, a, id, func(v ThreadView) bool { return !v.Running })
+	return await(t, a, id, func(v ThreadView) bool { return !v.Running && !v.Configuring })
 }
 func createTest(t *testing.T, a *App, command string) string {
 	t.Helper()
@@ -96,7 +95,7 @@ func TestStdioLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	v = sendDone(t, a, fork, "branch")
-	if v.SessionID == session || !strings.Contains(lastText(v), "previous_conversation") || !strings.Contains(lastText(v), "Echo: hello") {
+	if v.SessionID == session || len(v.Entries) != 6 || v.Entries[1].Text != "Echo: hello" || lastText(v) != "Echo: branch" {
 		t.Fatalf("fork lost context: %+v", v)
 	}
 	if len(findThread(t, a, id).Entries) != 4 {
@@ -108,6 +107,7 @@ func TestStdioLifecycle(t *testing.T) {
 	if err := a.Send(id, "blocked"); err == nil {
 		t.Fatal("sent to archived thread")
 	}
+	await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
 	if err := a.Archive(id, false); err != nil {
 		t.Fatal(err)
 	}
@@ -126,23 +126,23 @@ func TestStdioLifecycle(t *testing.T) {
 	}
 }
 
-func TestAgentWithoutLoadUsesContextOnce(t *testing.T) {
-	command := testutil.Agent(t) + " no-load"
-	dir := t.TempDir()
-	a := openTest(t, dir)
-	id := createTest(t, a, command)
-	sendDone(t, a, id, "first")
-	if err := a.Close(); err != nil {
-		t.Fatal(err)
-	}
-	a = openTest(t, dir)
-	v := sendDone(t, a, id, "second")
-	if !strings.Contains(lastText(v), "previous_conversation") || v.Notice == "" {
-		t.Fatal("missing fallback context/warning")
-	}
-	v = sendDone(t, a, id, "third")
-	if lastText(v) != "Echo: third" {
-		t.Fatal("context sent more than once")
+func TestMissingSessionCapabilitiesRejectAgent(t *testing.T) {
+	command := testutil.Agent(t)
+	for _, capability := range []string{"load", "list", "resume", "close", "fork"} {
+		t.Run(capability, func(t *testing.T) {
+			a := openTest(t, t.TempDir())
+			before := len(fixtureCalls(t, command))
+			id := createTest(t, a, command+" no-"+capability)
+			v := sendDone(t, a, id, "must not reach agent")
+			if !strings.Contains(v.Error, "session/"+capability) || !strings.Contains(v.Error, "cannot use") || v.SessionID != "" {
+				t.Fatalf("unsupported agent accepted: %+v", v)
+			}
+			for _, call := range fixtureCalls(t, command)[before:] {
+				if call != "initialize" {
+					t.Fatal("rejected agent received session request", call)
+				}
+			}
+		})
 	}
 }
 
@@ -279,19 +279,31 @@ func TestUpdateReductionAndTerminalExtensions(t *testing.T) {
 	}
 }
 
-func TestInterruptedHistoryRecovery(t *testing.T) {
+func TestConversationIsNotPersisted(t *testing.T) {
 	dir := t.TempDir()
-	s, _, err := state.Open(dir)
+	a := openTest(t, dir)
+	id := createTest(t, a, testutil.Agent(t))
+	sendDone(t, a, id, "Public title")
+	sendDone(t, a, id, "private-conversation-marker")
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "threads.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Save(state.Data{Version: 1, Threads: []state.Thread{{ID: "interrupted", Running: true}}}); err != nil {
-		t.Fatal(err)
+	for _, forbidden := range []string{`"entries"`, `"running"`, `"session"`, `"rawOutput"`, `"previous_conversation"`, "private-conversation-marker"} {
+		if strings.Contains(string(b), forbidden) {
+			t.Fatalf("persisted conversation field %s", forbidden)
+		}
 	}
-	_ = s.Close()
-	a := openTest(t, dir)
-	v := findThread(t, a, "interrupted")
-	if v.Running || !strings.Contains(lastText(v), "closed during") {
-		t.Fatal(v)
+	a = openTest(t, dir)
+	v := findThread(t, a, id)
+	if v.Running || len(v.Entries) != 0 || v.Session.Usage != nil {
+		t.Fatal("restored local conversation", v)
+	}
+	v = connected(t, a, id)
+	if len(v.Entries) != 4 || lastText(v) != "Echo: private-conversation-marker" {
+		t.Fatal("agent replay missing", v)
 	}
 }

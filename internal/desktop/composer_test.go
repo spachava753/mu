@@ -3,6 +3,7 @@ package desktop_test
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/spachava753/mu/internal/app"
@@ -73,7 +74,7 @@ func TestLongModelOptionsScroll(t *testing.T) {
 				t.Fatal("no persistent usage indicator")
 			}
 			message, _ := tt.Find("Message")
-			if usage.Y < message.Y+message.H || usage.Y+usage.H > float32(size[1]) || usage.H < 30 {
+			if usage.Y < message.Y+message.H || usage.Y+usage.H > float32(size[1]) || usage.H < 18 {
 				t.Fatalf("usage is not visible below the draft: %+v", usage)
 			}
 			if !tt.HasText("Context 16,000 / 128,000 (12.5%)") {
@@ -84,6 +85,30 @@ func TestLongModelOptionsScroll(t *testing.T) {
 			if !tt.HasText("Token usage") {
 				t.Fatal("indicator does not expose token details")
 			}
+			screenshot(t, tt, fmt.Sprintf("usage-details-%d", size[0]))
+			tt.Key(0, ui.KeyEscape)
+			tt.Frame()
+			// A long draft grows the composer up to its limit, then scrolls,
+			// keeping the toolbar and usage line in the window.
+			click(t, tt, "Message")
+			for i := range 12 {
+				if i > 0 {
+					tt.Key(ui.Shift, ui.KeyEnter)
+				}
+				tt.Type(fmt.Sprintf("Draft line %d with enough words to show how the composer wraps and grows", i+1))
+			}
+			tt.Frame()
+			tt.Advance(320 * time.Millisecond)
+			if len(a.Snapshot().Threads[0].Entries) != 0 {
+				t.Fatal("Shift+Enter sent the draft")
+			}
+			message, _ = tt.Find("Message")
+			usage, _ = tt.Find("Context usage")
+			send, _ := tt.Find("Send")
+			if message.H < 100 || send.Y < message.Y+message.H || usage.Y+usage.H > float32(size[1]) {
+				t.Fatalf("long draft layout: message %+v send %+v usage %+v", message, send, usage)
+			}
+			screenshot(t, tt, fmt.Sprintf("composer-multiline-%d", size[0]))
 		})
 	}
 }

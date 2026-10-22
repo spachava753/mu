@@ -41,9 +41,11 @@ func (p *commandPicker) matches(text string, commands []acp.AvailableCommand) []
 	return matches
 }
 
-func (v *View) messageInput(c *ui.Context, t app.ThreadView) {
+// messageInput is the borderless draft field inside the composer box, which
+// anchors the slash-command suggestions.
+func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) ui.Element {
 	p := &v.picker
-	input := ui.TextArea(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(2, 6).Disabled(t.Running).OnTextKey(func(k ui.TextKey) bool {
+	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).Disabled(t.Running).OnTextKey(func(k ui.TextKey) bool {
 		matches := p.matches(k.Text(), t.Session.Commands)
 		_, slash := slashQuery(k.Text())
 		if slash && !p.dismissed && k.Mods == 0 {
@@ -92,9 +94,9 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView) {
 		}
 	}
 	wasOpen := p.open
-	ui.PopoverBase(c.Key("slash-commands"), input, &p.open, func(panel ui.Element) {
-		bounds := input.Bounds()
-		panel.Transition(popupMotion).Label("Slash commands").AttachTo(input, ui.AnchorTopStart, ui.AnchorBottomStart).Width(bounds.W).Margin(0, 0, 6, 0).Padding(4).Radius(6).Border(1, c.Theme().Border).Background(c.Theme().Background)
+	ui.PopoverBase(c.Key("slash-commands"), anchor, &p.open, func(panel ui.Element) {
+		bounds := anchor.Bounds()
+		panel.Transition(popupMotion).Label("Slash commands").AttachTo(anchor, ui.AnchorTopStart, ui.AnchorBottomStart).Width(bounds.W).Margin(0, 0, 6, 0).Padding(4).Radius(8).Border(1, c.Theme().Border).Background(c.Theme().Background)
 		ui.Scroll(c).Label("Command choices").MaxHeight(min(240, max(64, bounds.Y-20))).Children(func() {
 			if len(matches) == 0 {
 				message := "No matching commands"
@@ -110,9 +112,9 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView) {
 				ui.Text(c, message).Padding(10).FontSize(12).TextColor(c.Theme().TextMuted)
 			}
 			for i, command := range matches {
-				item := ui.ButtonBase(c.Key(command.Name)).Transition(colorMotion).Label("/"+command.Name).FillWidth().Padding(8, 10).Radius(4)
+				item := ui.ButtonBase(c.Key(command.Name)).Transition(colorMotion).Label("/"+command.Name).FillWidth().Padding(7, 10).Radius(5)
 				if i == p.index {
-					item.Background(c.Theme().SurfacePressed)
+					item.Background(c.Theme().SurfaceHover.Mix(c.Theme().Accent, 0.08))
 				} else if item.Hovered() {
 					item.Background(c.Theme().SurfaceHover)
 				}
@@ -120,12 +122,14 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView) {
 					item.ScrollIntoView()
 				}
 				item.Children(func() {
-					ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-						ui.Text(c, "/"+command.Name).FontSize(13).Bold().SingleLine()
-						ui.Text(c, command.Description).FontSize(12).TextColor(c.Theme().TextMuted).SingleLine()
-						if command.Input != nil && command.Input.Unstructured != nil {
-							ui.Text(c, command.Input.Unstructured.Hint).FontSize(11).TextColor(c.Theme().TextMuted).SingleLine()
-						}
+					ui.Row(c).Grow(1).MinWidth(0).Gap(12).Children(func() {
+						ui.Text(c, "/"+command.Name).FontSize(12.5).FontWeight(600).Font("monospace").SingleLine().Shrink(0)
+						ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
+							ui.Text(c, command.Description).FontSize(12).TextColor(c.Theme().TextMuted).SingleLine()
+							if command.Input != nil && command.Input.Unstructured != nil {
+								ui.Text(c, command.Input.Unstructured.Hint).FontSize(11).TextColor(c.Theme().TextMuted.Alpha(0.8)).SingleLine()
+							}
+						})
 					})
 				}).OnClick(func() {
 					*v.draft(t.ID) = "/" + command.Name + " "
@@ -138,4 +142,5 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView) {
 	if wasOpen && !p.open {
 		p.dismissed = true
 	}
+	return input
 }

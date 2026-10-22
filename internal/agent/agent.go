@@ -100,6 +100,9 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	if err == nil && info.ProtocolVersion != acp.ProtocolVersionNumber {
 		err = fmt.Errorf("unsupported ACP version %d", info.ProtocolVersion)
 	}
+	if err == nil {
+		err = RequireSessions(info.AgentCapabilities)
+	}
 	if err != nil {
 		p.Close()
 		return nil, p.Error(fmt.Errorf("initialize ACP: %w", err))

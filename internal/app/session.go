@@ -12,10 +12,10 @@ import (
 )
 
 func (a *App) configuringLocked(id string) bool {
-	return a.runtimes[id] != nil && a.runtimes[id].configuring
+	return a.runtimes[id] != nil && (a.runtimes[id].configuring || a.runtimes[id].closing != nil)
 }
 
-// Connect discovers session options without sending a prompt.
+// Connect creates a session or loads its authoritative history without a prompt.
 func (a *App) Connect(id string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -37,14 +37,14 @@ func (a *App) Connect(id string) error {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-	r.configuring, r.configCancel, r.sessionError = true, cancel, ""
-	config, history := *t, slices.Clone(t.Entries)
+	r.configuring, r.configCancel, r.sessionError, r.err = true, cancel, "", ""
+	config := *t.Thread
 	a.notifyLocked()
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		defer cancel()
-		_, _, err := a.connect(ctx, config, history, r)
+		_, err := a.connect(ctx, config, r)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		r.configuring, r.configCancel = false, nil
@@ -54,6 +54,25 @@ func (a *App) Connect(id string) error {
 		a.notifyLocked()
 	}()
 	return nil
+}
+
+// Reload replaces the view from a fresh agent replay, including external edits.
+func (a *App) Reload(id string) error {
+	a.mu.Lock()
+	t := a.threadLocked(id)
+	if a.closed || t == nil {
+		a.mu.Unlock()
+		return errors.New("thread unavailable")
+	}
+	if t.Running || a.configuringLocked(id) {
+		a.mu.Unlock()
+		return errors.New("wait for the current session request")
+	}
+	r := a.runtimeLocked(id)
+	a.detachLocked(r)
+	r.err, r.sessionError = "", ""
+	a.mu.Unlock()
+	return a.Connect(id)
 }
 
 // SetOption validates against the latest advertised choices. The agent's complete

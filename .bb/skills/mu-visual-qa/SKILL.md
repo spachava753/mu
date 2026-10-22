@@ -13,11 +13,12 @@ Run commands from the repository root, not this skill directory. Read the releva
 
 | Area | Tests and source | Captures |
 | --- | --- | --- |
-| Conversation, sidebar, session controls, light/dark | `TestMatteSidebarAndSessionControls` in [features_test.go](../../../internal/desktop/features_test.go) | `matte-dark-*`, `matte-light-*`, `collapsed-*`, `session-options-*` |
+| Conversation, sidebar, session controls, expanded tool details, light/dark | `TestMatteSidebarAndSessionControls` in [features_test.go](../../../internal/desktop/features_test.go) | `matte-dark-*`, `tool-expanded-*`, `matte-light-*`, `collapsed-*`, `session-options-*` |
+| Permission card and running turn (1100×780 only) | `TestQAConversation` in [qa_test.go](../../../internal/desktop/qa_test.go) | `permission-1100`, `running-1100` |
 | Saved agents | `TestAgentSettingsUI` in [features_test.go](../../../internal/desktop/features_test.go) | `agent-settings.png` |
-| Long model menus and visible usage | `TestLongModelOptionsScroll` in [composer_test.go](../../../internal/desktop/composer_test.go) | `scrollable-models-*`, `composer-usage-*` |
+| Long model menus, visible usage, long drafts | `TestLongModelOptionsScroll` in [composer_test.go](../../../internal/desktop/composer_test.go) | `scrollable-models-*`, `composer-usage-*`, `usage-details-*`, `composer-multiline-*` |
 | Slash completion and composer focus | `TestSlashCommandPicker` in [composer_test.go](../../../internal/desktop/composer_test.go) | `slash-commands-*` |
-| Discovery and selective import | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*` |
+| Discovery and selective import, scrolled list | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*`, `session-import-scrolled-*` |
 | Motion, reversal, reduced motion | Tests in [motion_test.go](../../../internal/desktop/motion_test.go) and [disclosure_test.go](../../../internal/desktop/disclosure_test.go) | `TestRecordMotion` writes `mu-motion.gif`; the other tests assert intermediate states |
 
 Choose scenarios affected by the change. For a general visual review, run all static capture scenarios below. Layout scenarios cover 800×600 and 1100×780; the existing Settings capture is only 1100×780. Light/dark captures currently come from the conversation/sidebar scenario, not every screen. Extend coverage when an affected screen, size, or appearance is missing; do not claim it was tested merely because another scenario covers it.
@@ -30,7 +31,7 @@ Use a fresh ignored directory so old images cannot be mistaken for results of a 
 mkdir -p .qa &&
 out="$(mktemp -d "$PWD/.qa/visual-qa-XXXXXX")" &&
 MU_QA_RENDER_DIR="$out" go test ./internal/desktop \
-  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestLongModelOptionsScroll|TestSlashCommandPicker|TestSelectiveSessionImportUI)$' \
+  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestLongModelOptionsScroll|TestSlashCommandPicker|TestSelectiveSessionImportUI|TestQAConversation)$' \
   -count=1 -v -timeout 120s &&
 printf 'Screenshots: %s\n' "$out"
 ```

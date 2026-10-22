@@ -58,35 +58,29 @@ func TestSavedAgents(t *testing.T) {
 	}
 }
 
-func TestSettingsMigration(t *testing.T) {
+func TestLastCommandDoesNotCreateSavedAgent(t *testing.T) {
 	dir := t.TempDir()
 	store, _, err := state.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Save(state.Data{Version: 1, LastCommand: `"/user/path/my-agent" --stdio`}); err != nil {
+	if err := store.Save(state.Data{LastCommand: "my-agent --stdio"}); err != nil {
 		t.Fatal(err)
 	}
-	_ = store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	a := openTest(t, dir)
 	s := a.Snapshot()
-	if len(s.Agents) != 1 || s.Agents[0].Command != `"/user/path/my-agent" --stdio` || s.DefaultAgentID != s.Agents[0].ID {
-		t.Fatal("user's previous command not migrated", s)
-	}
-	id := s.Agents[0].ID
-	if err := a.RemoveAgent(id); err != nil {
-		t.Fatal(err)
+	if len(s.Agents) != 0 || s.DefaultAgentID != "" || s.LastCommand != "my-agent --stdio" {
+		t.Fatal("last-used command became a saved agent", s)
 	}
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
 	a = openTest(t, dir)
 	if len(a.Snapshot().Agents) != 0 {
-		t.Fatal("deleted configuration was resurrected by migration")
-	}
-	fresh := openTest(t, t.TempDir())
-	if len(fresh.Snapshot().Agents) != 0 {
-		t.Fatal("invented a built-in agent")
+		t.Fatal("restart invented a saved agent")
 	}
 }
 

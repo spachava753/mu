@@ -1,4 +1,4 @@
-// Package state holds Mu's local thread history. Agent-owned sessions remain with the agent.
+// Package state persists session references and preferences, never conversations.
 package state
 
 import (
@@ -28,25 +28,21 @@ type Entry struct {
 }
 
 type Thread struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Command      string    `json:"command"`
-	AgentID      string    `json:"agentId,omitempty"`
-	AgentName    string    `json:"agentName,omitempty"`
-	Session      Session   `json:"session,omitempty"`
-	Cwd          string    `json:"cwd"`
-	SessionID    string    `json:"sessionId,omitempty"`
-	NeedsContext bool      `json:"needsContext,omitempty"`
-	ParentID     string    `json:"parentId,omitempty"`
-	Archived     bool      `json:"archived,omitempty"`
-	Running      bool      `json:"running,omitempty"`
-	Notice       string    `json:"notice,omitempty"`
-	Created      time.Time `json:"created"`
-	Updated      time.Time `json:"updated"`
-	Entries      []Entry   `json:"entries"`
+	ID                    string    `json:"id"`
+	Title                 string    `json:"title"`
+	Command               string    `json:"command"`
+	AgentID               string    `json:"agentId,omitempty"`
+	AgentName             string    `json:"agentName,omitempty"`
+	Cwd                   string    `json:"cwd"`
+	SessionID             string    `json:"sessionId,omitempty"`
+	ParentID              string    `json:"parentId,omitempty"`
+	Archived              bool      `json:"archived,omitempty"`
+	Created               time.Time `json:"created"`
+	Updated               time.Time `json:"updated"`
+	AdditionalDirectories []string  `json:"additionalDirectories,omitempty"`
 }
 
-// Session stores the last state reported by the agent, not client guesses.
+// Session is transient state reported by the agent. It is never included in Data.
 type Session struct {
 	Options        []acp.SessionConfigOption  `json:"options,omitempty"`
 	Modes          *acp.SessionModeState      `json:"modes,omitempty"`
@@ -73,11 +69,9 @@ type AgentConfig struct {
 }
 
 type Data struct {
-	SettingsVersion  int           `json:"settingsVersion,omitempty"`
 	Agents           []AgentConfig `json:"agents,omitempty"`
 	DefaultAgentID   string        `json:"defaultAgentId,omitempty"`
 	SidebarCollapsed bool          `json:"sidebarCollapsed,omitempty"`
-	Version          int           `json:"version"`
 	LastCommand      string        `json:"lastCommand,omitempty"`
 	LastCwd          string        `json:"lastCwd,omitempty"`
 	Threads          []Thread      `json:"threads"`
@@ -124,23 +118,13 @@ func Open(dir string) (*Store, Data, error) {
 	s := &Store{dir: dir, lock: lock}
 	b, err := os.ReadFile(filepath.Join(dir, "threads.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return s, Data{Version: 1}, nil
+		return s, Data{}, nil
 	}
 	if err == nil {
 		err = json.Unmarshal(b, &data)
 	}
-	if err == nil && data.Version != 1 {
-		err = fmt.Errorf("unsupported data version %d", data.Version)
-	}
 	if err == nil {
-		seen := map[string]bool{}
-		for _, t := range data.Threads {
-			if t.ID == "" || seen[t.ID] {
-				err = errors.New("invalid or duplicate thread ID")
-				break
-			}
-			seen[t.ID] = true
-		}
+		err = validateThreads(data.Threads)
 	}
 	if err != nil {
 		_ = s.Close()
@@ -149,8 +133,30 @@ func Open(dir string) (*Store, Data, error) {
 	return s, data, nil
 }
 
-// Save replaces the file atomically; incomplete writes never replace the last good history.
+func validateThreads(threads []Thread) error {
+	seen := map[string]bool{}
+	references := map[[3]string]bool{}
+	for _, t := range threads {
+		if t.ID == "" || seen[t.ID] {
+			return errors.New("invalid or duplicate thread ID")
+		}
+		seen[t.ID] = true
+		if t.SessionID != "" {
+			key := [3]string{t.AgentID, t.Command, t.SessionID}
+			if references[key] {
+				return errors.New("duplicate session reference for an agent connection")
+			}
+			references[key] = true
+		}
+	}
+	return nil
+}
+
+// Save replaces the file atomically; incomplete writes never replace the last good registry.
 func (s *Store) Save(data Data) error {
+	if err := validateThreads(data.Threads); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
