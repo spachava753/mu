@@ -188,7 +188,7 @@ func main() {
 				_ = json.Unmarshal(p.Value, &enabled)
 			}
 			reply(m.ID, map[string]any{"configOptions": options(model, enabled)})
-			notify(session, map[string]any{"sessionUpdate": "usage_update", "used": 16000, "size": 128000, "cost": map[string]any{"amount": 0.250, "currency": "EUR"}})
+			notify(session, map[string]any{"sessionUpdate": "usage_update", "used": 16000, "size": 128000, "cost": map[string]any{"amount": 0.250, "currency": "USD"}})
 		case "session/set_mode":
 			mode = p.ModeID
 			notify(session, map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": mode})

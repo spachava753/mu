@@ -40,7 +40,7 @@ func initialState(session string) {
 		}
 	}
 	notify(session, map[string]any{"sessionUpdate": "available_commands_update", "availableCommands": commands})
-	notify(session, map[string]any{"sessionUpdate": "usage_update", "used": 12000, "size": 128000, "cost": map[string]any{"amount": 0.125, "currency": "EUR"}, "_meta": map[string]any{"limits": map[string]any{"remaining": 42}}})
+	notify(session, map[string]any{"sessionUpdate": "usage_update", "used": 12000, "size": 128000, "cost": map[string]any{"amount": 0.125, "currency": "USD"}, "_meta": map[string]any{"limits": map[string]any{"remaining": 42}}})
 }
 func sessionUpdates(session string) {
 	update(session, "user_message_chunk", "up")

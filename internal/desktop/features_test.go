@@ -170,7 +170,7 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 				}
 				return false
 			})
-			if !tt.HasText("Context 16,000 / 128,000 (12.5%)") || !tt.HasText("Cost EUR 0.2500") {
+			if !tt.HasText("Context 16,000 / 128,000 (12.5%)") || !tt.HasText("Cost USD 0.2500") {
 				t.Fatal("context limit/cost not rendered", tt.Texts())
 			}
 			if !tt.HasText("Session controls and usage") {
