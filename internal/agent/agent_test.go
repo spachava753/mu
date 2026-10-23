@@ -27,23 +27,38 @@ func TestCommandParsing(t *testing.T) {
 
 func TestFileDelegation(t *testing.T) {
 	ctx := context.Background()
-	cwd := t.TempDir()
-	p := &Process{cwd: cwd}
+	cwd, extra, other := t.TempDir(), t.TempDir(), t.TempDir()
+	p := &Process{roots: map[acp.SessionId][]string{}, terminals: map[string]*terminal{}}
+	p.OpenSession("s", cwd, []string{extra})
+	p.OpenSession("other", other, nil)
 	path := filepath.Join(cwd, "sub", "file.txt")
-	_, err := p.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: path, Content: "one\ntwo\nthree\n"})
+	_, err := p.WriteTextFile(ctx, acp.WriteTextFileRequest{SessionId: "s", Path: path, Content: "one\ntwo\nthree\n"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	line, limit := 2, 1
-	r, err := p.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: path, Line: &line, Limit: &limit})
+	r, err := p.ReadTextFile(ctx, acp.ReadTextFileRequest{SessionId: "s", Path: path, Line: &line, Limit: &limit})
 	if err != nil || r.Content != "two\n" {
 		t.Fatal(r, err)
 	}
 	line = 99
-	r, err = p.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: path, Line: &line})
+	r, err = p.ReadTextFile(ctx, acp.ReadTextFileRequest{SessionId: "s", Path: path, Line: &line})
 	if err != nil || r.Content != "" {
 		t.Fatal(r, err)
 	}
+	// Additional directories are part of the session's root set.
+	if _, err := p.WriteTextFile(ctx, acp.WriteTextFileRequest{SessionId: "s", Path: filepath.Join(extra, "notes.txt"), Content: "ok"}); err != nil {
+		t.Fatal("additional root rejected", err)
+	}
+	// Roots are per session, even on a shared process.
+	if _, err := p.ReadTextFile(ctx, acp.ReadTextFileRequest{SessionId: "other", Path: path}); err == nil {
+		t.Fatal("read another session's workspace")
+	}
+	p.ForgetSession("s")
+	if _, err := p.ReadTextFile(ctx, acp.ReadTextFileRequest{SessionId: "s", Path: path}); err == nil {
+		t.Fatal("closed session kept file access")
+	}
+	p.OpenSession("s", cwd, nil)
 	outside := filepath.Join(t.TempDir(), "private")
 	if err := os.WriteFile(outside, []byte("private"), 0600); err != nil {
 		t.Fatal(err)
@@ -52,10 +67,10 @@ func TestFileDelegation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{outside, filepath.Join(cwd, "link"), "relative"} {
-		if _, err := p.ReadTextFile(ctx, acp.ReadTextFileRequest{Path: path}); err == nil {
+		if _, err := p.ReadTextFile(ctx, acp.ReadTextFileRequest{SessionId: "s", Path: path}); err == nil {
 			t.Fatal("read outside workspace", path)
 		}
-		if _, err := p.WriteTextFile(ctx, acp.WriteTextFileRequest{Path: path, Content: "changed"}); err == nil {
+		if _, err := p.WriteTextFile(ctx, acp.WriteTextFileRequest{SessionId: "s", Path: path, Content: "changed"}); err == nil {
 			t.Fatal("wrote outside workspace", path)
 		}
 	}
@@ -92,6 +107,10 @@ func TestProcessAndTerminal(t *testing.T) {
 	if !p.Info.AgentCapabilities.LoadSession || !p.Alive() {
 		t.Fatal("not initialized")
 	}
+	if _, err := p.CreateTerminal(ctx, acp.CreateTerminalRequest{SessionId: "s", Command: "true"}); err == nil {
+		t.Fatal("terminal created for an unknown session")
+	}
+	p.OpenSession("s", t.TempDir(), nil)
 	limit := 6
 	r, err := p.CreateTerminal(ctx, acp.CreateTerminalRequest{SessionId: "s", Command: "sh", Args: []string{"-c", "printf 'first-last'"}, OutputByteLimit: &limit})
 	if err != nil {

@@ -22,7 +22,6 @@ func main() {
 func run() (err error) {
 	dataDir := flag.String("data-dir", "", "session reference directory (default: $XDG_DATA_HOME/mu or ~/.local/share/mu)")
 	command := flag.String("agent", "", "prefill the new-thread ACP command")
-	cwd := flag.String("cwd", "", "prefill the new-thread working directory")
 	flag.Parse()
 	if *dataDir == "" {
 		*dataDir, err = state.DefaultDir()
@@ -30,7 +29,11 @@ func run() (err error) {
 			return err
 		}
 	}
-	a, err := app.Open(*dataDir)
+	workDir, err := state.DefaultWorkingDir()
+	if err != nil {
+		return err
+	}
+	a, err := app.Open(*dataDir, workDir)
 	if err != nil {
 		return err
 	}
@@ -39,13 +42,7 @@ func run() (err error) {
 			err = closeErr
 		}
 	}()
-	if *cwd == "" && a.Snapshot().LastCwd == "" {
-		*cwd, err = os.Getwd()
-		if err != nil {
-			return err
-		}
-	}
-	view := desktop.New(a, *command, *cwd)
+	view := desktop.New(a, *command)
 	mygo.App.SetName("Mu")
 	mygo.App.WhenReady(func() {
 		w := mygo.NewWindow(mygo.WindowOptions{Title: "Mu", Width: 1100, Height: 780, MinWidth: 800, MinHeight: 600, Content: ui.View(view.Draw)})

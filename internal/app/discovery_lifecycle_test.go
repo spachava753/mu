@@ -40,7 +40,7 @@ func TestShutdownCancelsDiscoveryAndFork(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(filepath.Dir(command), "fixture-sessions", "calls.jsonl"), nil, 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := a.Discover(id, t.TempDir()); err != nil {
+				if err := a.Discover(id); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -78,14 +78,14 @@ func TestSupersededDiscoveryCannotReplaceCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Discover(id, t.TempDir()); err != nil {
+	if err := a.Discover(id); err != nil {
 		t.Fatal(err)
 	}
 	first := a.Snapshot().Catalog.Generation
 	if _, err := a.SaveAgent(state.AgentConfig{ID: id, Name: "Fixture", Command: command}, true); err != nil {
 		t.Fatal(err)
 	}
-	c := discoverDone(t, a, id, t.TempDir())
+	c := discoverDone(t, a, id)
 	if c.Generation == first || !c.Complete || c.Error != "" || c.Agent.Command != command {
 		t.Fatal("stale discovery replaced result", c)
 	}
@@ -98,13 +98,13 @@ func TestSupersededDiscoveryCannotReplaceCatalog(t *testing.T) {
 }
 
 func TestImportRollsBackOnSaveFailure(t *testing.T) {
-	command, dir, cwd := testutil.Agent(t), t.TempDir(), t.TempDir()
+	command, dir := testutil.Agent(t), t.TempDir()
 	a := openTest(t, dir)
 	configID, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := a.CreateWithAgent(configID, cwd)
+	source, err := a.CreateWithAgent(configID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestImportRollsBackOnSaveFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Discovery is separate from the removed thread's tracked close work.
-	c := discoverDone(t, a, configID, cwd)
+	c := discoverDone(t, a, configID)
 	if c.Error != "" || len(c.Sessions) != 1 {
 		t.Fatal(c)
 	}

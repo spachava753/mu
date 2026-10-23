@@ -15,7 +15,7 @@ func TestAgentCommandIsUserConfigured(t *testing.T) {
 		{name: "explicit override wins", saved: "previous-agent --stdio", override: "another-agent --acp", want: "another-agent --acp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, err := app.Open(t.TempDir())
+			a, err := app.Open(t.TempDir(), t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -24,13 +24,12 @@ func TestAgentCommandIsUserConfigured(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			cwd := t.TempDir()
 			if tc.saved != "" {
-				if _, err := a.Create(tc.saved, cwd); err != nil {
+				if _, err := a.Create(tc.saved, ""); err != nil {
 					t.Fatal(err)
 				}
 			}
-			view := desktop.New(a, tc.override, cwd)
+			view := desktop.New(a, tc.override)
 			tt := ui.NewTester(view.Draw, 1100, 780)
 			if err := tt.Click("New thread"); err != nil {
 				t.Fatal(err)

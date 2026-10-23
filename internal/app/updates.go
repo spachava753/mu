@@ -29,7 +29,7 @@ func contentText(b acp.ContentBlock) string {
 	return ""
 }
 
-func toolText(content []acp.ToolCallContent, raw any) string {
+func toolText(content []acp.ToolCallContent, raw any, outputs map[string]string) string {
 	var b strings.Builder
 	for _, c := range content {
 		if c.Content != nil {
@@ -44,7 +44,11 @@ func toolText(content []acp.ToolCallContent, raw any) string {
 			b.WriteString("After:\n" + c.Diff.NewText + "\n")
 		}
 		if c.Terminal != nil {
-			b.WriteString("Terminal: " + c.Terminal.TerminalId + "\n")
+			if output, ok := outputs[c.Terminal.TerminalId]; ok {
+				b.WriteString(output)
+			} else {
+				b.WriteString("Terminal: " + c.Terminal.TerminalId + "\n")
+			}
 		}
 	}
 	if b.Len() == 0 && raw != nil {
@@ -69,9 +73,7 @@ func storeMeta(s *state.Session, source string, meta map[string]any) {
 
 // A connection generation prevents late notifications from a closed process
 // from mutating a reconnected thread, even if it resumes the same session ID.
-func (a *App) receive(id string, r *runtime, epoch uint64, n acp.SessionNotification) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *App) receiveLocked(id string, r *runtime, epoch uint64, n acp.SessionNotification) {
 	if r.epoch != epoch {
 		return
 	}
@@ -107,79 +109,40 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 		_ = json.Unmarshal(b, &envelope)
 		storeMeta(&t.Session, envelope.Kind, envelope.Meta)
 	}
-	appendChunk := func(role string, block acp.ContentBlock) {
-		if !r.acceptUpdates {
-			return
-		}
-		text := contentText(block)
-		if text == "" {
-			return
-		}
-		i := len(t.Entries) - 1
-		if i < 0 || t.Entries[i].Role != role || block.Text == nil {
-			t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: role})
-			i = len(t.Entries) - 1
-		}
-		t.Entries[i].Text += text
-		if block.Text == nil {
-			t.Entries[i].Details = pretty(block)
-		}
-	}
 	switch {
 	case u.UserMessageChunk != nil:
-		if !r.acceptUpdates {
-			break
-		}
-		block := u.UserMessageChunk.Content
-		if r.job != nil && block.Text != nil && r.echoTarget != "" {
-			r.echoText += block.Text.Text
-			if strings.HasPrefix(r.echoTarget, r.echoText) {
-				break
-			}
-			// An agent-authored/revised user message is not an echo of our prompt.
-			if r.echoEntry == "" {
-				r.echoEntry = state.ID()
-				t.Entries = append(t.Entries, state.Entry{ID: r.echoEntry, Role: "user", Text: r.echoText})
-			} else {
-				for i := range t.Entries {
-					if t.Entries[i].ID == r.echoEntry {
-						t.Entries[i].Text = r.echoText
-					}
-				}
-			}
-		} else {
-			appendChunk("user", block)
+		c := u.UserMessageChunk
+		if r.acceptUpdates && !echoLocked(t, r, messageID(c.MessageId), c.Content) {
+			appendChunk(t, "user", messageID(c.MessageId), c.Content)
 		}
 	case u.AgentMessageChunk != nil:
-		appendChunk("assistant", u.AgentMessageChunk.Content)
+		if r.acceptUpdates {
+			appendChunk(t, "assistant", messageID(u.AgentMessageChunk.MessageId), u.AgentMessageChunk.Content)
+		}
 	case u.AgentThoughtChunk != nil:
-		appendChunk("thought", u.AgentThoughtChunk.Content)
+		if r.acceptUpdates {
+			appendChunk(t, "thought", messageID(u.AgentThoughtChunk.MessageId), u.AgentThoughtChunk.Content)
+		}
 	case u.ToolCall != nil:
 		if !r.acceptUpdates {
 			break
 		}
 		v := u.ToolCall
-		e := toolEntry(t, string(v.ToolCallId))
-		e.Title, e.Status, e.Text = v.Title, string(v.Status), toolText(v.Content, v.RawOutput)
-		e.Details = mergeToolDetails(e.Details, v)
-		applyTerminal(e, v.Content, v.Meta, r)
+		call := &toolCall{Title: v.Title, Kind: v.Kind, Status: v.Status, Content: v.Content, Locations: v.Locations, RawInput: v.RawInput, RawOutput: v.RawOutput, Meta: v.Meta}
+		r.tools[string(v.ToolCallId)] = call
+		renderTool(t, r, string(v.ToolCallId), call)
 	case u.ToolCallUpdate != nil:
 		if !r.acceptUpdates {
 			break
 		}
 		v := u.ToolCallUpdate
-		e := toolEntry(t, string(v.ToolCallId))
-		if v.Title != nil {
-			e.Title = *v.Title
+		call := r.tools[string(v.ToolCallId)]
+		if call == nil {
+			call = &toolCall{}
+			r.tools[string(v.ToolCallId)] = call
 		}
-		if v.Status != nil {
-			e.Status = string(*v.Status)
-		}
-		if v.Content != nil || v.RawOutput != nil {
-			e.Text = toolText(v.Content, v.RawOutput)
-		}
-		e.Details = mergeToolDetails(e.Details, v)
-		applyTerminal(e, v.Content, v.Meta, r)
+		call.patch(v)
+		renderTool(t, r, string(v.ToolCallId), call)
 	case u.Plan != nil:
 		setPlan(t, "legacy", planText(u.Plan.Entries), pretty(u.Plan))
 	case u.PlanUpdate != nil:
@@ -218,28 +181,170 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 	a.notifyLocked()
 }
 
-func toolEntry(t *thread, id string) *state.Entry {
-	for i := len(t.Entries) - 1; i >= 0; i-- {
-		if t.Entries[i].Role == "tool" && t.Entries[i].ToolID == id {
+func messageID(id *string) string {
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
+// appendChunk groups chunks by the agent's message ID. Agents may omit IDs in
+// ACP v1; only then are adjacent same-role text chunks treated as one message.
+func appendChunk(t *thread, role, id string, block acp.ContentBlock) {
+	text := contentText(block)
+	if text == "" {
+		return
+	}
+	i := -1
+	if id != "" {
+		for j := len(t.Entries) - 1; j >= 0; j-- {
+			if t.Entries[j].Role == role && t.Entries[j].MessageID == id {
+				i = j
+				break
+			}
+		}
+	} else if last := len(t.Entries) - 1; last >= 0 && t.Entries[last].Role == role && t.Entries[last].MessageID == "" && block.Text != nil {
+		i = last
+	}
+	if i < 0 {
+		t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: role, MessageID: id})
+		i = len(t.Entries) - 1
+	}
+	t.Entries[i].Text += text
+	if block.Text == nil {
+		t.Entries[i].Details = joinNonEmpty("\n", t.Entries[i].Details, pretty(block))
+	}
+}
+
+func joinNonEmpty(sep string, values ...string) string {
+	var parts []string
+	for _, v := range values {
+		if v != "" {
+			parts = append(parts, v)
+		}
+	}
+	return strings.Join(parts, sep)
+}
+
+// echoLocked reports whether a user chunk is the agent's account of the prompt
+// Mu just sent, which is already shown as Mu's local user entry. With message
+// IDs, the first user message of the turn is identified once and the agent's
+// text replaces the local copy if it differs. Without IDs, text that diverges
+// from the prompt is an agent-authored user message and gets its own entry.
+func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
+	e := &r.echo
+	if r.job == nil || e.target == "" || block.Text == nil {
+		return false
+	}
+	if id != "" {
+		if e.id == "" && e.text == "" {
+			e.id = id
+		}
+		if id != e.id {
+			return false
+		}
+	} else if e.id != "" {
+		return false
+	}
+	e.text += block.Text.Text
+	local := entryByID(t, e.local)
+	if id != "" {
+		if local != nil {
+			local.MessageID = id
+			if !strings.HasPrefix(e.target, e.text) {
+				local.Text = e.text
+			}
+		}
+		return true
+	}
+	if strings.HasPrefix(e.target, e.text) {
+		return true
+	}
+	if divergent := entryByID(t, e.entry); divergent != nil {
+		divergent.Text = e.text
+	} else {
+		e.entry = state.ID()
+		t.Entries = append(t.Entries, state.Entry{ID: e.entry, Role: "user", Text: e.text})
+	}
+	return true
+}
+
+func entryByID(t *thread, id string) *state.Entry {
+	if id == "" {
+		return nil
+	}
+	for i := range t.Entries {
+		if t.Entries[i].ID == id {
 			return &t.Entries[i]
 		}
 	}
-	t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: "tool", ToolID: id, Title: "Tool"})
-	return &t.Entries[len(t.Entries)-1]
+	return nil
 }
 
-func mergeToolDetails(old string, update any) string {
-	data := map[string]any{}
-	_ = json.Unmarshal([]byte(old), &data)
-	var next map[string]any
-	b, _ := json.Marshal(update)
-	_ = json.Unmarshal(b, &next)
-	for k, v := range next {
-		if k != "sessionUpdate" {
-			data[k] = v
+// toolCall is the projection of one ACP tool call. Updates patch the fields
+// they supply; collections such as content are replaced as a whole. The
+// visible entry is derived from it, never edited directly.
+type toolCall struct {
+	Title     string                 `json:"title,omitempty"`
+	Kind      acp.ToolKind           `json:"kind,omitempty"`
+	Status    acp.ToolCallStatus     `json:"status,omitempty"`
+	Content   []acp.ToolCallContent  `json:"content,omitempty"`
+	Locations []acp.ToolCallLocation `json:"locations,omitempty"`
+	RawInput  any                    `json:"rawInput,omitempty"`
+	RawOutput any                    `json:"rawOutput,omitempty"`
+	Meta      map[string]any         `json:"_meta,omitempty"`
+}
+
+func (c *toolCall) patch(u *acp.SessionToolCallUpdate) {
+	if u.Title != nil {
+		c.Title = *u.Title
+	}
+	if u.Kind != nil {
+		c.Kind = *u.Kind
+	}
+	if u.Status != nil {
+		c.Status = *u.Status
+	}
+	if u.Content != nil {
+		c.Content = u.Content
+	}
+	if u.Locations != nil {
+		c.Locations = u.Locations
+	}
+	if u.RawInput != nil {
+		c.RawInput = u.RawInput
+	}
+	if u.RawOutput != nil {
+		c.RawOutput = u.RawOutput
+	}
+	if u.Meta != nil {
+		c.Meta = u.Meta
+	}
+}
+
+func (c *toolCall) terminal(id string) bool {
+	return slices.ContainsFunc(c.Content, func(item acp.ToolCallContent) bool {
+		return item.Terminal != nil && item.Terminal.TerminalId == id
+	})
+}
+
+func renderTool(t *thread, r *runtime, id string, c *toolCall) {
+	var e *state.Entry
+	for i := len(t.Entries) - 1; i >= 0; i-- {
+		if t.Entries[i].Role == "tool" && t.Entries[i].ToolID == id {
+			e = &t.Entries[i]
+			break
 		}
 	}
-	return pretty(data)
+	if e == nil {
+		t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: "tool", ToolID: id})
+		e = &t.Entries[len(t.Entries)-1]
+	}
+	e.Title, e.Status = c.Title, string(c.Status)
+	if e.Title == "" {
+		e.Title = "Tool"
+	}
+	e.Text, e.Details = toolText(c.Content, c.RawOutput, r.outputs), pretty(c)
 }
 
 func planText(entries []acp.PlanEntry) string {
@@ -260,31 +365,6 @@ func setPlan(t *thread, id, text, details string) {
 	t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: "plan", PlanID: id, Title: "Plan", Text: text, Details: details})
 }
 
-func applyTerminal(e *state.Entry, content []acp.ToolCallContent, meta map[string]any, r *runtime) {
-	for _, c := range content {
-		if c.Terminal != nil {
-			e.TerminalID = c.Terminal.TerminalId
-		}
-	}
-	// This terminal-output extension is also used for agent-owned terminals.
-	if output, ok := meta["terminal_output"].(map[string]any); ok {
-		id, _ := output["terminal_id"].(string)
-		data, _ := output["data"].(string)
-		if id != "" && id == e.TerminalID {
-			r.outputs[id] = tailText(r.outputs[id] + data)
-		}
-	}
-	if output, ok := r.outputs[e.TerminalID]; ok {
-		e.Text = output
-	}
-}
-func tailText(text string) string {
-	const limit = 1024 * 1024
-	if len(text) <= limit {
-		return text
-	}
-	return "[Earlier output truncated]\n" + strings.ToValidUTF8(text[len(text)-limit:], "�")
-}
 func (a *App) terminalOutput(id string, r *runtime, epoch uint64, session acp.SessionId, terminalID, output string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -293,9 +373,9 @@ func (a *App) terminalOutput(id string, r *runtime, epoch uint64, session acp.Se
 	}
 	r.outputs[terminalID] = output
 	if t := a.threadLocked(id); t != nil {
-		for i := range t.Entries {
-			if t.Entries[i].TerminalID == terminalID {
-				t.Entries[i].Text = output
+		for toolID, call := range r.tools {
+			if call.terminal(terminalID) {
+				renderTool(t, r, toolID, call)
 			}
 		}
 	}

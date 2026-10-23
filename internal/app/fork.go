@@ -11,14 +11,14 @@ import (
 )
 
 // Fork asks the agent to fork the thread's session with ACP session/fork, on
-// the connection where the source is already open. The source stays connected
-// and unchanged. Each thread owns its process, so the fork is closed on the
-// source's connection and loaded (with replay) by its own thread when opened.
+// the source's connection. The source stays connected and unchanged. The fork
+// response does not include history, so the fork is closed again and its own
+// thread loads it, with replay, on the same shared connection when opened.
 // It blocks; desktop callers run it off the UI thread. No local transcript is
 // sent to the agent or copied to the new view.
 //
 // A non-empty ID with an error means the fork was created and saved, but
-// releasing it from the source's connection failed.
+// closing it on the connection failed.
 func (a *App) Fork(id string) (string, error) {
 	a.mu.Lock()
 	source := a.threadLocked(id)
@@ -38,7 +38,7 @@ func (a *App) Fork(id string) (string, error) {
 		a.mu.Unlock()
 		return "", errors.New("connect this thread before forking its agent session")
 	}
-	config := *source.Thread
+	config, deadline := *source.Thread, a.agentDeadline
 	r := a.runtimeLocked(id)
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	r.configuring, r.configCancel, r.sessionError = true, cancel, ""
@@ -65,7 +65,7 @@ func (a *App) Fork(id string) (string, error) {
 		return fail(err)
 	}
 	a.mu.Lock()
-	live := r.process == p && r.session == config.SessionID
+	live := r.live() && r.conn.process == p && r.session == config.SessionID
 	a.mu.Unlock()
 	if !live {
 		return fail(errors.New("the source session is no longer connected"))
@@ -78,9 +78,7 @@ func (a *App) Fork(id string) (string, error) {
 		return fail(errors.New("agent returned an invalid fork session ID"))
 	}
 	// The fork belongs to the agent; record it even if releasing it fails.
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_, closeErr := p.Conn.CloseSession(closeCtx, acp.CloseSessionRequest{SessionId: result.SessionId})
-	closeCancel()
+	closeErr := p.CloseSession(string(result.SessionId), deadline)
 
 	fork := config
 	fork.ID, fork.ParentID, fork.SessionID = state.ID(), id, string(result.SessionId)

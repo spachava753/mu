@@ -12,6 +12,18 @@ _Avoid_: Local conversation, Mu-owned history
 A session reference managed by Mu, with local presentation and archive preferences. A new thread can exist before the agent creates its session.
 _Avoid_: Session copy, transcript backup
 
+**Working directory**:
+The general folder in which each thread without a project gets its own new, randomly named folder.
+_Avoid_: Project folder, launch directory
+
+**Project**:
+A named, existing folder that all of its threads work in. Removing a project leaves its threads and folder unchanged.
+_Avoid_: Workspace, repository
+
+**Agent connection**:
+One running agent process that serves the sessions of every thread using the same agent configuration.
+_Avoid_: Thread process
+
 **Discovery**:
 Finding the sessions an agent makes available, without adding them to Mu's managed threads.
 _Avoid_: Automatic import, history synchronization

@@ -22,7 +22,7 @@ func TestSavedAgents(t *testing.T) {
 	if a.Snapshot().DefaultAgentID != second {
 		t.Fatal("default not selected")
 	}
-	thread, err := a.CreateWithAgent(second, t.TempDir())
+	thread, err := a.CreateWithAgent(second, "")
 	if err != nil {
 		t.Fatal(err)
 	}

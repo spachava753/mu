@@ -40,6 +40,7 @@ type Process struct {
 	cwd       string
 	mu        sync.Mutex
 	terminals map[string]*terminal
+	roots     map[acp.SessionId][]string
 }
 
 func ParseCommand(command string) ([]string, error) {
@@ -62,7 +63,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	cmd.Dir = cwd
 	prepareProcess(cmd)
 	cmd.WaitDelay = time.Second
-	p := &Process{cmd: cmd, hooks: hooks, cwd: cwd, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, terminals: map[string]*terminal{}}
+	p := &Process{cmd: cmd, hooks: hooks, cwd: cwd, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, terminals: map[string]*terminal{}, roots: map[acp.SessionId][]string{}}
 	cmd.Stderr = p.stderr
 	p.stdin, err = cmd.StdinPipe()
 	if err != nil {
@@ -196,22 +197,60 @@ func (p *Process) RequestPermission(ctx context.Context, req acp.RequestPermissi
 	return p.hooks.Permission(ctx, req)
 }
 
-// Client file access is restricted to the chosen workspace, including symlinks.
+// OpenSession grants a session client file access within its effective root
+// set: its working directory followed by the additional directories it was
+// created or loaded with. One process can serve several sessions.
+func (p *Process) OpenSession(session string, cwd string, additional []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.roots[acp.SessionId(session)] = append([]string{cwd}, additional...)
+}
+
+// ForgetSession revokes a session's file access and kills its terminals.
+func (p *Process) ForgetSession(session string) {
+	p.mu.Lock()
+	delete(p.roots, acp.SessionId(session))
+	for id, t := range p.terminals {
+		if t.session == acp.SessionId(session) {
+			t.kill()
+			delete(p.terminals, id)
+		}
+	}
+	p.mu.Unlock()
+}
+
+func (p *Process) sessionRoots(session acp.SessionId) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	roots, ok := p.roots[session]
+	if !ok {
+		return nil, fmt.Errorf("unknown session %q", session)
+	}
+	return roots, nil
+}
+
+// Client file access is restricted to the session's roots, including symlinks.
 // This is not a sandbox: the agent executable and its commands run as the user.
-func (p *Process) rootPath(path string) (*os.Root, string, error) {
+func (p *Process) rootPath(session acp.SessionId, path string) (*os.Root, string, error) {
 	if !filepath.IsAbs(path) {
 		return nil, "", errors.New("ACP file paths must be absolute")
 	}
-	rel, err := filepath.Rel(p.cwd, path)
-	if err != nil || !filepath.IsLocal(rel) {
-		return nil, "", errors.New("file is outside this thread's working directory")
+	roots, err := p.sessionRoots(session)
+	if err != nil {
+		return nil, "", err
 	}
-	root, err := os.OpenRoot(p.cwd)
-	return root, rel, err
+	for _, dir := range roots {
+		rel, err := filepath.Rel(dir, path)
+		if err == nil && filepath.IsLocal(rel) {
+			root, err := os.OpenRoot(dir)
+			return root, rel, err
+		}
+	}
+	return nil, "", errors.New("file is outside this session's workspace roots")
 }
 
 func (p *Process) ReadTextFile(_ context.Context, req acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	root, rel, err := p.rootPath(req.Path)
+	root, rel, err := p.rootPath(req.SessionId, req.Path)
 	if err != nil {
 		return acp.ReadTextFileResponse{}, err
 	}
@@ -252,7 +291,7 @@ func (p *Process) ReadTextFile(_ context.Context, req acp.ReadTextFileRequest) (
 }
 
 func (p *Process) WriteTextFile(_ context.Context, req acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	root, rel, err := p.rootPath(req.Path)
+	root, rel, err := p.rootPath(req.SessionId, req.Path)
 	if err != nil {
 		return acp.WriteTextFileResponse{}, err
 	}

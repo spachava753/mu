@@ -18,9 +18,6 @@ func RequireSessions(c acp.AgentCapabilities) error {
 	if c.SessionCapabilities.List == nil {
 		missing = append(missing, "session/list")
 	}
-	if c.SessionCapabilities.Resume == nil {
-		missing = append(missing, "session/resume")
-	}
 	if c.SessionCapabilities.Close == nil {
 		missing = append(missing, "session/close")
 	}
@@ -33,16 +30,37 @@ func RequireSessions(c acp.AgentCapabilities) error {
 	return nil
 }
 
-// CloseSession releases agent resources before terminating this thread's process.
-// A failed or hung close is reported, but cannot prevent local process cleanup.
-func (p *Process) CloseSession(session string) error {
-	defer p.Close()
+// Bounded runs a request under a hard deadline. A context deadline cannot
+// interrupt an SDK write blocked on a full pipe, so on timeout the process is
+// closed, which fails the write, and the request is joined before returning.
+func (p *Process) Bounded(timeout time.Duration, request func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- request(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		p.Close()
+		<-done
+		return fmt.Errorf("agent did not respond within %s and was terminated", timeout)
+	}
+}
+
+// CloseSession releases one session's agent resources, then revokes its local
+// file and terminal access. Other sessions on the process are unaffected unless
+// the agent fails to respond within timeout, in which case Bounded terminates
+// the process.
+func (p *Process) CloseSession(session string, timeout time.Duration) error {
+	defer p.ForgetSession(session)
 	if session == "" || !p.Alive() {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, err := p.Conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(session)})
+	err := p.Bounded(timeout, func(ctx context.Context) error {
+		_, err := p.Conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(session)})
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("close session %s: %w", session, p.Error(err))
 	}

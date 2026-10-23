@@ -34,7 +34,11 @@ func (p *Process) CreateTerminal(_ context.Context, req acp.CreateTerminalReques
 	if len(p.terminals) >= 32 {
 		return acp.CreateTerminalResponse{}, errors.New("release an existing terminal before creating more (limit 32)")
 	}
-	cwd := p.cwd
+	roots, ok := p.roots[req.SessionId]
+	if !ok {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("unknown session %q", req.SessionId)
+	}
+	cwd := roots[0]
 	if req.Cwd != nil {
 		cwd = *req.Cwd
 	}

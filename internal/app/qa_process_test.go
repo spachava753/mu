@@ -31,7 +31,7 @@ func TestQACancelConnecting(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			storage, workspace := t.TempDir(), t.TempDir()
-			a, err := app.Open(storage)
+			a, err := app.Open(storage, workspace)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,7 +41,7 @@ func TestQACancelConnecting(t *testing.T) {
 				t.Fatal(err)
 			}
 			command := "'" + strings.ReplaceAll(exe, "'", "'\"'\"'") + "' -test.run=^TestQAStalledAgent$ -- mu-qa-stalled-agent"
-			id, err := a.Create(command, workspace)
+			id, err := a.Create(command, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -78,7 +78,7 @@ func TestQACancelConnecting(t *testing.T) {
 			if time.Since(start) > 5*time.Second {
 				t.Fatal("shutdown waited for initialization timeout")
 			}
-			reopened, err := app.Open(storage)
+			reopened, err := app.Open(storage, workspace)
 			if err != nil {
 				t.Fatal(err)
 			}

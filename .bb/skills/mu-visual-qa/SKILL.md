@@ -16,6 +16,7 @@ Run commands from the repository root, not this skill directory. Read the releva
 | Conversation, sidebar, session controls, expanded tool details, light/dark | `TestMatteSidebarAndSessionControls` in [features_test.go](../../../internal/desktop/features_test.go) | `matte-dark-*`, `tool-expanded-*`, `matte-light-*`, `collapsed-*`, `session-options-*` |
 | Permission card and running turn (1100×780 only) | `TestQAConversation` in [qa_test.go](../../../internal/desktop/qa_test.go) | `permission-1100`, `running-1100` |
 | Saved agents | `TestAgentSettingsUI` in [features_test.go](../../../internal/desktop/features_test.go) | `agent-settings.png` |
+| Working directory, projects, new-thread form, project groups in the sidebar | `TestProjectsUI` in [features_test.go](../../../internal/desktop/features_test.go) | `project-settings-*`, `new-thread-*`, `new-thread-project-*`, `project-sidebar-*` |
 | Long model menus, visible usage, long drafts | `TestLongModelOptionsScroll` in [composer_test.go](../../../internal/desktop/composer_test.go) | `scrollable-models-*`, `composer-usage-*`, `usage-details-*`, `composer-multiline-*` |
 | Slash completion and composer focus | `TestSlashCommandPicker` in [composer_test.go](../../../internal/desktop/composer_test.go) | `slash-commands-*` |
 | Discovery and selective import, scrolled list | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*`, `session-import-scrolled-*` |
@@ -31,7 +32,7 @@ Use a fresh ignored directory so old images cannot be mistaken for results of a 
 mkdir -p .qa &&
 out="$(mktemp -d "$PWD/.qa/visual-qa-XXXXXX")" &&
 MU_QA_RENDER_DIR="$out" go test ./internal/desktop \
-  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestLongModelOptionsScroll|TestSlashCommandPicker|TestSelectiveSessionImportUI|TestQAConversation)$' \
+  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestSlashCommandPicker|TestSelectiveSessionImportUI|TestQAConversation)$' \
   -count=1 -v -timeout 120s &&
 printf 'Screenshots: %s\n' "$out"
 ```

@@ -33,7 +33,7 @@ func (a *App) Connect(id string) error {
 	if r.configuring || t.Running {
 		return nil
 	}
-	if r.process != nil && r.process.Alive() && r.session != "" {
+	if r.live() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
@@ -170,7 +170,7 @@ func (a *App) changeSession(id string, prepare sessionChange) error {
 	if r.configuring {
 		return errors.New("a session settings request is already running")
 	}
-	if r.process == nil || !r.process.Alive() || r.session == "" {
+	if !r.live() {
 		return errors.New("connect to load current session options first")
 	}
 	request, err := prepare(t.Session, acp.SessionId(r.session))
@@ -179,7 +179,7 @@ func (a *App) changeSession(id string, prepare sessionChange) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	r.configuring, r.configCancel, r.sessionError = true, cancel, ""
-	p := r.process
+	p := r.conn.process
 	a.wg.Add(1)
 	a.notifyLocked()
 	go func() {

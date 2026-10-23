@@ -17,7 +17,7 @@ import (
 
 func testApp(t *testing.T) *app.App {
 	t.Helper()
-	a, err := app.Open(t.TempDir())
+	a, err := app.Open(t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,15 +82,15 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			first, err := a.CreateWithAgent(agentID, t.TempDir())
+			first, err := a.CreateWithAgent(agentID, "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			second, err := a.CreateWithAgent(agentID, t.TempDir())
+			second, err := a.CreateWithAgent(agentID, "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			view := desktop.New(a, "", t.TempDir())
+			view := desktop.New(a, "")
 			tt := ui.NewTester(view.Draw, size[0], size[1])
 			tt.SetDark(true)
 			if err := a.Send(first, "first thread"); err != nil {
@@ -194,7 +194,7 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 
 func TestAgentSettingsUI(t *testing.T) {
 	a := testApp(t)
-	view := desktop.New(a, "", t.TempDir())
+	view := desktop.New(a, "")
 	tt := ui.NewTester(view.Draw, 1100, 780)
 	click(t, tt, "Settings")
 	click(t, tt, "Agent name")
@@ -232,5 +232,68 @@ func TestAgentSettingsUI(t *testing.T) {
 	click(t, tt, "Remove configuration")
 	if len(a.Snapshot().Agents) != 0 || a.Snapshot().Threads[0].Command != "my-agent --stdio" {
 		t.Fatal("removal affected existing thread")
+	}
+}
+
+func TestProjectsUI(t *testing.T) {
+	for _, size := range [][2]int{{1100, 780}, {800, 600}} {
+		t.Run(fmt.Sprint(size[0]), func(t *testing.T) { projectsUI(t, size[0], size[1]) })
+	}
+}
+
+func projectsUI(t *testing.T, width, height int) {
+	a := testApp(t)
+	folder := t.TempDir()
+	view := desktop.New(a, "unused-agent")
+	tt := ui.NewTester(view.Draw, width, height)
+	if _, err := a.Create("unused-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	click(t, tt, "Settings")
+	click(t, tt, "Add project")
+	click(t, tt, "Project name")
+	tt.Type("Website")
+	tt.Frame()
+	click(t, tt, "Project folder")
+	tt.Type(folder)
+	tt.Frame()
+	click(t, tt, "Save project")
+	s := a.Snapshot()
+	if len(s.Projects) != 1 || s.Projects[0].Dir != folder || !tt.HasText("Project saved.") {
+		t.Fatal("project not saved", s.Projects, tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("project-settings-%d", width))
+	click(t, tt, "Done")
+	click(t, tt, "New thread")
+	screenshot(t, tt, fmt.Sprintf("new-thread-%d", width))
+	if !tt.HasText("No project") || !tt.HasText("Works in a new, randomly named folder in") {
+		t.Fatal("new thread does not default to its own folder", tt.Texts())
+	}
+	click(t, tt, "Thread project")
+	click(t, tt, "Website")
+	if !tt.HasText("shared by every thread in this project.") {
+		t.Fatal("project folder not explained", tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("new-thread-project-%d", width))
+	click(t, tt, "Create thread")
+	s = a.Snapshot()
+	if len(s.Threads) != 2 || s.Threads[0].Cwd != folder || s.Threads[0].ProjectID != s.Projects[0].ID {
+		t.Fatal("thread not created in the project", s.Threads)
+	}
+	if !tt.HasText("Website") || !tt.HasText("No project") {
+		t.Fatal("sidebar does not group threads by project", tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("project-sidebar-%d", width))
+	// Starting another thread from a project thread keeps its project.
+	click(t, tt, "New thread")
+	click(t, tt, "Create thread")
+	if s = a.Snapshot(); len(s.Threads) != 3 || s.Threads[0].ProjectID != s.Threads[1].ProjectID {
+		t.Fatal("new thread left the current project", s.Threads)
+	}
+	click(t, tt, "Settings")
+	click(t, tt, "Edit project: Website")
+	click(t, tt, "Remove project")
+	if s = a.Snapshot(); len(s.Projects) != 0 || s.Threads[0].Cwd != folder {
+		t.Fatal("project removal changed threads", s)
 	}
 }

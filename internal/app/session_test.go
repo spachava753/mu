@@ -215,15 +215,20 @@ func TestIdleUpdatesAndStaleConnections(t *testing.T) {
 	r.session, r.epoch, r.acceptUpdates = "s", 2, true
 	a.mu.Unlock()
 	u := acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Used: 5, Size: 10}}}
-	a.receive(id, r, 1, u)
+	receive := func(epoch uint64, n acp.SessionNotification) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.receiveLocked(id, r, epoch, n)
+	}
+	receive(1, u)
 	if findThread(t, a, id).Session.Usage != nil {
 		t.Fatal("old process updated a reconnected session")
 	}
-	a.receive(id, r, 2, u)
+	receive(2, u)
 	if findThread(t, a, id).Session.Usage.Used != 5 {
 		t.Fatal("idle update dropped")
 	}
-	a.receive(id, r, 2, acp.SessionNotification{SessionId: "s", Update: acp.UpdateUserMessageText("agent-originated user message")})
+	receive(2, acp.SessionNotification{SessionId: "s", Update: acp.UpdateUserMessageText("agent-originated user message")})
 	if lastText(findThread(t, a, id)) != "agent-originated user message" {
 		t.Fatal("live user message update dropped")
 	}

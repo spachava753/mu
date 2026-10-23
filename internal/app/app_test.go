@@ -13,10 +13,13 @@ import (
 
 func openTest(t *testing.T, dir string) *App {
 	t.Helper()
-	a, err := Open(dir)
+	a, err := Open(dir, filepath.Join(dir, "work"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep tests of unresponsive agents fast. TestStopWaitsForSlowCancellation
+	// covers the real deadline.
+	a.agentDeadline = 2 * time.Second
 	t.Cleanup(func() {
 		if err := a.Close(); err != nil {
 			t.Error(err)
@@ -59,7 +62,7 @@ func sendDone(t *testing.T, a *App, id, text string) ThreadView {
 }
 func createTest(t *testing.T, a *App, command string) string {
 	t.Helper()
-	id, err := a.Create(command, t.TempDir())
+	id, err := a.Create(command, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +131,7 @@ func TestStdioLifecycle(t *testing.T) {
 
 func TestMissingSessionCapabilitiesRejectAgent(t *testing.T) {
 	command := testutil.Agent(t)
-	for _, capability := range []string{"load", "list", "resume", "close", "fork"} {
+	for _, capability := range []string{"load", "list", "close", "fork"} {
 		t.Run(capability, func(t *testing.T) {
 			a := openTest(t, t.TempDir())
 			before := len(fixtureCalls(t, command))
@@ -143,6 +146,14 @@ func TestMissingSessionCapabilitiesRejectAgent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResumeIsNotRequired(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, testutil.Agent(t)+" no-resume")
+	if v := sendDone(t, a, id, "hello"); v.Error != "" || lastText(v) != "Echo: hello" {
+		t.Fatalf("agent without session/resume rejected: %+v", v)
 	}
 }
 
@@ -183,6 +194,22 @@ func TestPermissionsAndStop(t *testing.T) {
 				t.Fatal(v)
 			}
 		})
+	}
+}
+
+func TestStopWaitsForSlowCancellation(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	a.agentDeadline = AgentDeadline
+	id := createTest(t, a, testutil.Agent(t)+" slow-cancel")
+	if err := a.Send(id, "wait"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, id, func(v ThreadView) bool { return lastText(v) == "Waiting" })
+	started := time.Now()
+	a.Stop(id)
+	v := await(t, a, id, func(v ThreadView) bool { return !v.Running })
+	if time.Since(started) < 3*time.Second || v.Error != "" || !v.Connected || !strings.HasPrefix(lastText(v), "Stopped.") {
+		t.Fatalf("agent was terminated instead of finishing its cancellation: %+v", v)
 	}
 }
 
@@ -238,7 +265,7 @@ func TestAtomicFailureDoesNotCreatePhantomThread(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "threads.json"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Create("agent", t.TempDir()); err == nil {
+	if _, err := a.Create("agent", ""); err == nil {
 		t.Fatal("expected save failure")
 	}
 	if len(a.Snapshot().Threads) != 0 || a.Snapshot().StorageError == "" {
@@ -273,9 +300,10 @@ func TestUpdateReductionAndTerminalExtensions(t *testing.T) {
 	if lastText(findThread(t, a, id)) != "completed output" {
 		t.Fatal("terminal did not update")
 	}
+	// Extension metadata is retained for inspection but is not a terminal transport.
 	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{ToolCallId: "tool", Meta: map[string]any{"terminal_output": map[string]any{"terminal_id": "term", "data": " delta"}}}}})
-	if lastText(findThread(t, a, id)) != "completed output delta" {
-		t.Fatal("lost Pi terminal delta")
+	if v := findThread(t, a, id); lastText(v) != "completed output" || !strings.Contains(v.Entries[len(v.Entries)-1].Details, "terminal_output") {
+		t.Fatal("metadata changed terminal output or was dropped", v.Entries)
 	}
 }
 

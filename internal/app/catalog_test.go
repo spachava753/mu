@@ -16,9 +16,9 @@ import (
 	"github.com/spachava753/mu/internal/testutil"
 )
 
-func discoverDone(t *testing.T, a *App, agentID, cwd string) Catalog {
+func discoverDone(t *testing.T, a *App, agentID string) Catalog {
 	t.Helper()
-	if err := a.Discover(agentID, cwd); err != nil {
+	if err := a.Discover(agentID); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -31,6 +31,27 @@ func discoverDone(t *testing.T, a *App, agentID, cwd string) Catalog {
 	}
 	t.Fatal("discovery timed out")
 	return Catalog{}
+}
+
+// setRoots edits the fixture agent's own record of a session's directories.
+func setRoots(t *testing.T, command, session string, roots []string) {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(command), "fixture-sessions", session+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(b, &saved); err != nil {
+		t.Fatal(err)
+	}
+	saved["additionalDirectories"], saved["title"] = roots, "Fixture session"
+	if b, err = json.Marshal(saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func fixtureCalls(t *testing.T, command string) []string {
@@ -94,7 +115,7 @@ func TestDiscoveryImportAndExternalRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := len(fixtureCalls(t, command))
-	c := discoverDone(t, a, agentID, cwd)
+	c := discoverDone(t, a, agentID)
 	if c.Error != "" || !c.Complete || len(c.Sessions) != 3 || len(a.Snapshot().Threads) != 0 {
 		t.Fatalf("bad discovery: %+v", c)
 	}
@@ -122,6 +143,21 @@ func TestDiscoveryImportAndExternalRemoval(t *testing.T) {
 	if len(v.Entries) != 2 || lastText(v) != "Echo: external history" {
 		t.Fatal("import did not load agent history", v)
 	}
+	// Different listed additional directories do not invalidate the reference
+	// or expand the roots accepted at import.
+	if err := a.Archive(id, true); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
+	setRoots(t, command, external[0], []string{t.TempDir()})
+	c = discoverDone(t, a, agentID)
+	if v := findThread(t, a, id); c.Error != "" || !slices.Equal(v.AdditionalDirectories, additional) || v.Title != "Fixture session" || !strings.Contains(v.Notice, "additional directories") {
+		t.Fatalf("changed additional directories mishandled: %+v", v)
+	}
+	setRoots(t, command, external[0], additional)
+	if err := a.Archive(id, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Archive(id, true); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +165,7 @@ func TestDiscoveryImportAndExternalRemoval(t *testing.T) {
 	if err := os.Remove(filepath.Join(filepath.Dir(command), "fixture-sessions", external[0]+".json")); err != nil {
 		t.Fatal(err)
 	}
-	c = discoverDone(t, a, agentID, cwd)
+	c = discoverDone(t, a, agentID)
 	if c.Error != "" || len(c.Sessions) != 2 || len(a.Snapshot().Threads) != 1 || findThread(t, a, id).Notice == "" {
 		t.Fatal("absence silently removed reference", c)
 	}
@@ -164,13 +200,13 @@ func TestDiscoveryImportAndExternalRemoval(t *testing.T) {
 }
 
 func TestDiscoveryErrorsAndStaleImport(t *testing.T) {
-	command, cwd := testutil.Agent(t), t.TempDir()
+	command := testutil.Agent(t)
 	a := openTest(t, t.TempDir())
 	agentID, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command + " repeat-cursor"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := discoverDone(t, a, agentID, cwd)
+	c := discoverDone(t, a, agentID)
 	if c.Error == "" || c.Complete {
 		t.Fatal("looping pagination accepted", c)
 	}
@@ -181,7 +217,7 @@ func TestDiscoveryErrorsAndStaleImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c = discoverDone(t, a, agentID, cwd)
+	c = discoverDone(t, a, agentID)
 	if c.Error != "" || !c.Complete {
 		t.Fatal(c)
 	}

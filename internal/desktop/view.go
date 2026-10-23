@@ -24,7 +24,10 @@ type View struct {
 	settingsOpen, sessionOpen, usageOpen bool
 	picker                               commandPicker
 	deleteID                             string
-	command, cwd, agentID                string
+	command, agentID, workDir, projectID string
+	editProject                          state.Project
+	projectNotice                        string
+	projectForm                          bool
 	customCommand                        bool
 	editAgent                            state.AgentConfig
 	makeDefault                          bool
@@ -37,16 +40,13 @@ type View struct {
 	md                                   markdown.Options
 }
 
-func New(a *app.App, command, cwd string) *View {
+func New(a *app.App, command string) *View {
 	s := a.Snapshot()
 	custom := command != "" || len(s.Agents) == 0
 	if command == "" {
 		command = s.LastCommand
 	}
-	if cwd == "" {
-		cwd = s.LastCwd
-	}
-	v := &View{app: a, command: command, cwd: cwd, agentID: s.DefaultAgentID, customCommand: custom, drafts: map[string]*string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
+	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, drafts: map[string]*string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
 	for _, t := range s.Threads {
 		if !t.Archived {
 			v.selected = t.ID
@@ -78,7 +78,14 @@ func (v *View) openNew() {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
 	v.creating, v.settingsOpen, v.sessionOpen, v.err = true, false, false, ""
-	v.agentID = v.app.Snapshot().DefaultAgentID
+	s := v.app.Snapshot()
+	v.agentID, v.projectID = s.DefaultAgentID, ""
+	// Start in the project of the thread being viewed.
+	for _, t := range s.Threads {
+		if t.ID == v.selected {
+			v.projectID = t.ProjectID
+		}
+	}
 }
 func (v *View) fail(err error) {
 	if err != nil {
@@ -277,11 +284,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 				quietButton(c, toggle).OnClick(func() { v.archived = !v.archived })
 			})
 			ui.Scroll(c).Grow(1).MinHeight(0).Gap(1).Padding(2, 10, 8, 10).Children(func() {
-				for _, thread := range s.Threads {
-					if thread.Archived == v.archived {
-						v.threadRow(c, thread)
-					}
-				}
+				v.threadGroups(c, s)
 				if count == 0 {
 					text := "No threads yet."
 					if v.archived {
@@ -296,6 +299,36 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 			})
 		})
 	})
+}
+
+// threadGroups lists the visible threads, grouped by project once any
+// project exists. Threads without a project come last.
+func (v *View) threadGroups(c *ui.Context, s app.Snapshot) {
+	visible := func(thread app.ThreadView) bool { return thread.Archived == v.archived }
+	group := func(id, name string) {
+		header := false
+		for _, thread := range s.Threads {
+			if !visible(thread) || thread.ProjectID != id {
+				continue
+			}
+			if !header && len(s.Projects) > 0 {
+				header = true
+				ui.Text(c.Key("group-"+id), name).Padding(10, 8, 3, 8).FontSize(11.5).FontWeight(500).TextColor(faint(c.Theme())).SingleLine()
+			}
+			v.threadRow(c, s, thread)
+		}
+	}
+	known := map[string]bool{}
+	for _, p := range s.Projects {
+		known[p.ID] = true
+		group(p.ID, p.Name)
+	}
+	group("", "No project")
+	for _, thread := range s.Threads {
+		if visible(thread) && thread.ProjectID != "" && !known[thread.ProjectID] {
+			v.threadRow(c, s, thread) // Not expected: removal clears the project.
+		}
+	}
 }
 
 // threadStatus is the most important state of a thread, if any, and the
@@ -318,7 +351,7 @@ func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 	return "", ui.Transparent
 }
 
-func (v *View) threadRow(c *ui.Context, thread app.ThreadView) {
+func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 	t := c.Theme()
 	selected := thread.ID == v.selected && !v.creating && !v.settingsOpen && !v.importOpen
 	button := ui.ButtonBase(c.Key(thread.ID)).Transition(colorMotion).Label("Thread: "+thread.Title).Padding(6, 8).Radius(5).FillWidth()
@@ -342,7 +375,13 @@ func (v *View) threadRow(c *ui.Context, thread app.ThreadView) {
 				if agent == "" {
 					agent = commandName(thread.Command)
 				}
-				meta = joinNonEmpty(" · ", agent, filepath.Base(thread.Cwd), timeLabel(thread.Updated))
+				// Project headings and Mu's own randomly named folders say
+				// nothing a row needs; other folders identify the work.
+				folder := filepath.Base(thread.Cwd)
+				if thread.ProjectID != "" || filepath.Dir(thread.Cwd) == s.WorkingDirectory {
+					folder = ""
+				}
+				meta = joinNonEmpty(" · ", agent, folder, timeLabel(thread.Updated))
 			}
 			text := ui.Text(c, meta).FontSize(11.5).TextColor(faint(t)).SingleLine()
 			if status != "" && color != t.TextMuted {
@@ -377,7 +416,7 @@ func itoa(n int) string { return count(n) }
 
 func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 	t := c.Theme()
-	screenHeader(c, "New thread", "Start an agent session in a working directory.", func() {
+	screenHeader(c, "New thread", "Start an agent session in a new folder.", func() {
 		if v.selected != "" {
 			ui.Button(c, "Cancel").OnClick(func() { v.creating = false; v.err = "" })
 		}
@@ -416,19 +455,31 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 					})
 				})
 			}
-			field(c, "Working directory", "Agents run as your user, with your environment and filesystem access. Use commands you trust.", func() {
-				ui.TextInput(c.Key("working-directory"), &v.cwd).Label("Working directory").Placeholder("/path/to/project")
+			field(c, "Project", "Agents run as your user, with your environment and filesystem access. Use commands you trust.", func() {
+				folder := "Works in a new, randomly named folder in " + shortPath(s.WorkingDirectory) + "."
+				choices := []choice{{ID: "", Name: "No project", Description: "A new folder for this thread"}}
+				for _, p := range s.Projects {
+					choices = append(choices, choice{ID: p.ID, Name: p.Name, Description: shortPath(p.Dir)})
+					if p.ID == v.projectID {
+						folder = "Works in " + shortPath(p.Dir) + ", shared by every thread in this project."
+					}
+				}
+				selectChoice(c.Key("project"), "Thread project", v.projectID, choices, false, func(id string) { v.projectID = id })
+				ui.Text(c, folder).FontSize(12.5).TextColor(t.TextMuted)
+				ui.Row(c).Gap(4).Margin(-2, 0, 0, -7).Children(func() {
+					quietButton(c, "Manage projects").OnClick(v.openSettings)
+				})
 			})
 			ui.Row(c).Gap(8).Children(func() {
 				custom := v.customCommand || len(s.Agents) == 0
-				missing := (custom && strings.TrimSpace(v.command) == "") || (!custom && v.agentID == "") || strings.TrimSpace(v.cwd) == ""
+				missing := (custom && strings.TrimSpace(v.command) == "") || (!custom && v.agentID == "")
 				ui.PrimaryButton(c, "Create thread").Disabled(missing).OnClick(func() {
 					var id string
 					var err error
 					if custom {
-						id, err = v.app.Create(v.command, v.cwd)
+						id, err = v.app.Create(v.command, v.projectID)
 					} else {
-						id, err = v.app.CreateWithAgent(v.agentID, v.cwd)
+						id, err = v.app.CreateWithAgent(v.agentID, v.projectID)
 					}
 					if err != nil {
 						v.fail(err)

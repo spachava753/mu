@@ -34,11 +34,11 @@ func sidebarWidth(t *testing.T, tt *ui.Tester) float32 {
 func TestSidebarAnimationAndReversal(t *testing.T) {
 	const expanded, collapsed = 232, 48
 	a := testApp(t)
-	_, err := a.Create("unused-agent", t.TempDir())
+	_, err := a.Create("unused-agent", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := desktop.New(a, "", "")
+	v := desktop.New(a, "")
 	tt := ui.NewTester(v.Draw, 800, 600)
 	if got := sidebarWidth(t, tt); got != expanded {
 		t.Fatal("initial layout should not animate", got)

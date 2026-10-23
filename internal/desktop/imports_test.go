@@ -43,7 +43,7 @@ func TestSelectiveSessionImportUI(t *testing.T) {
 				}
 			}
 			p.Close()
-			a, err := app.Open(t.TempDir())
+			a, err := app.Open(t.TempDir(), t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,7 +55,7 @@ func TestSelectiveSessionImportUI(t *testing.T) {
 			if _, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command}, true); err != nil {
 				t.Fatal(err)
 			}
-			view := desktop.New(a, "", cwd)
+			view := desktop.New(a, "")
 			tt := ui.NewTester(view.Draw, size[0], size[1])
 			tt.Frame()
 			click(t, tt, "Import sessions")
@@ -117,7 +117,7 @@ func TestSelectiveSessionImportUI(t *testing.T) {
 }
 
 func TestUnsupportedAgentErrorOutsideOptionsDialog(t *testing.T) {
-	a, err := app.Open(t.TempDir())
+	a, err := app.Open(t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,14 +126,14 @@ func TestUnsupportedAgentErrorOutsideOptionsDialog(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	view := desktop.New(a, testutil.Agent(t)+" no-resume", t.TempDir())
+	view := desktop.New(a, testutil.Agent(t)+" no-fork")
 	tt := ui.NewTester(view.Draw, 800, 600)
 	tt.Frame()
 	click(t, tt, "Create thread")
 	click(t, tt, "Session options")
 	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Configuring && s.Threads[0].SessionError != "" })
 	click(t, tt, "Close options")
-	if !strings.Contains(strings.Join(tt.Texts(), " "), "missing required capabilities: session/resume") {
+	if !strings.Contains(strings.Join(tt.Texts(), " "), "missing required capabilities: session/fork") {
 		t.Fatal("unsupported-agent error only visible in modal", tt.Texts())
 	}
 }

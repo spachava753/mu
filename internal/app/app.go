@@ -3,8 +3,11 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -48,14 +51,18 @@ type ThreadView struct {
 }
 
 type Snapshot struct {
-	Catalog                            Catalog
-	LifecycleError                     string
-	Agents                             []state.AgentConfig
-	DefaultAgentID                     string
-	SidebarCollapsed                   bool
-	Threads                            []ThreadView
-	LastCommand, LastCwd, StorageError string
+	Catalog                   Catalog
+	LifecycleError            string
+	Agents                    []state.AgentConfig
+	Projects                  []state.Project
+	DefaultAgentID            string
+	SidebarCollapsed          bool
+	Threads                   []ThreadView
+	LastCommand, StorageError string
+	WorkingDirectory          string
 }
+
+var errAppClosing = errors.New("app is closing")
 
 type pending struct {
 	Permission
@@ -72,22 +79,35 @@ type job struct {
 }
 type runtime struct {
 	Conversation
-	closing                         chan struct{}
-	identity                        [3]string
-	process                         *agent.Process
-	session                         string
-	job                             *job
-	status, err                     string
-	acceptUpdates                   bool
-	pending                         map[string]*pending
-	outputs                         map[string]string
-	epoch                           uint64
-	initializing                    bool
-	initialUpdates                  []acp.SessionNotification
-	configuring                     bool
-	sessionError                    string
-	configCancel                    context.CancelFunc
-	echoTarget, echoText, echoEntry string
+	closing        chan struct{}
+	identity       [3]string
+	conn           *connection
+	session        string
+	job            *job
+	status, err    string
+	acceptUpdates  bool
+	pending        map[string]*pending
+	outputs        map[string]string
+	tools          map[string]*toolCall
+	epoch          uint64
+	initializing   bool
+	initialUpdates []acp.SessionNotification
+	configuring    bool
+	sessionError   string
+	configCancel   context.CancelFunc
+	echo           promptEcho
+}
+
+// live reports whether the thread has an open session on a running process.
+func (r *runtime) live() bool { return r.conn.alive() && r.session != "" }
+
+// promptEcho tracks the agent's account of the prompt Mu sent this turn.
+type promptEcho struct {
+	target string // prompt text Mu sent
+	local  string // entry ID of Mu's local copy of the prompt
+	id     string // agent message ID identified as the echo
+	text   string // echoed text received so far
+	entry  string // separate entry for a divergent echo without message IDs
 }
 
 type App struct {
@@ -103,17 +123,29 @@ type App struct {
 	storageError      string
 	shutdownErrors    []error
 	closingSessions   map[[3]string]chan struct{}
+	connections       map[[2]string]*connection
 	catalog           Catalog
 	catalogCancel     context.CancelFunc
 	catalogGeneration uint64
+	defaultWorkingDir string
+	// agentDeadline bounds how long a stopping turn or closing session may
+	// take before Mu terminates the agent process. Cancelling can involve
+	// finishing a tool call or other cleanup in the agent, so it is generous.
+	agentDeadline time.Duration
 }
 
-func Open(dir string) (*App, error) {
+// AgentDeadline is how long Mu waits for an agent to end a cancelled turn or
+// close a session before terminating its process.
+const AgentDeadline = 10 * time.Second
+
+// Open loads Mu's data from dir. New threads get folders in defaultWorkingDir
+// until the user chooses another general working directory.
+func Open(dir, defaultWorkingDir string) (*App, error) {
 	store, data, err := state.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -165,7 +197,7 @@ func (a *App) threadLocked(id string) *thread {
 func (a *App) runtimeLocked(id string) *runtime {
 	r := a.runtimes[id]
 	if r == nil {
-		r = &runtime{pending: map[string]*pending{}, outputs: map[string]string{}}
+		r = &runtime{pending: map[string]*pending{}, outputs: map[string]string{}, tools: map[string]*toolCall{}}
 		a.runtimes[id] = r
 	}
 	return r
@@ -174,7 +206,7 @@ func (a *App) runtimeLocked(id string) *runtime {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{LastCommand: a.data.LastCommand, LastCwd: a.data.LastCwd, StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed}
+	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed}
 	for _, t := range a.data.Threads {
 		t.AdditionalDirectories = slices.Clone(t.AdditionalDirectories)
 		v := ThreadView{Thread: t}
@@ -183,7 +215,7 @@ func (a *App) Snapshot() Snapshot {
 			v.Entries = slices.Clone(r.Entries)
 			v.Session = r.Session.Clone()
 			v.Status, v.Error = r.status, r.err
-			v.Connected = r.process != nil && r.process.Alive() && r.session != ""
+			v.Connected = r.live()
 			v.Configuring, v.SessionError = r.configuring || r.closing != nil, r.sessionError
 			for _, p := range r.pending {
 				v.Permissions = append(v.Permissions, p.Permission)
@@ -200,40 +232,68 @@ func (a *App) Snapshot() Snapshot {
 	return s
 }
 
-func (a *App) Create(command, cwd string) (string, error) {
-	return a.create(command, cwd, "", "")
+// Create starts a thread with a one-off command. It works in the project's
+// folder, or without a project in a new folder of the general working directory.
+func (a *App) Create(command, projectID string) (string, error) {
+	return a.create(command, "", "", projectID)
 }
 
-func (a *App) create(command, cwd, agentID, agentName string) (string, error) {
+func (a *App) create(command, agentID, agentName, projectID string) (string, error) {
 	if _, err := agent.ParseCommand(command); err != nil {
 		return "", err
-	}
-	cwd, err := filepath.Abs(strings.TrimSpace(cwd))
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(cwd)
-	if err != nil {
-		return "", fmt.Errorf("working directory: %w", err)
-	}
-	if !info.IsDir() {
-		return "", errors.New("working directory must be a folder")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
 		return "", errors.New("app is closing")
 	}
-	t := state.Thread{ID: state.ID(), Title: "New thread", Command: command, AgentID: agentID, AgentName: agentName, Cwd: cwd, Created: time.Now(), Updated: time.Now()}
+	cwd, created, err := a.threadDirLocked(projectID)
+	if err != nil {
+		return "", err
+	}
+	t := state.Thread{ID: state.ID(), Title: "New thread", Command: command, AgentID: agentID, AgentName: agentName, ProjectID: projectID, Cwd: cwd, Created: time.Now(), Updated: time.Now()}
 	a.data.Threads = append(a.data.Threads, t)
-	oldCmd, oldCwd := a.data.LastCommand, a.data.LastCwd
-	a.data.LastCommand, a.data.LastCwd = command, cwd
+	oldCmd := a.data.LastCommand
+	a.data.LastCommand = command
 	if err := a.saveLocked(); err != nil {
 		a.data.Threads = a.data.Threads[:len(a.data.Threads)-1]
-		a.data.LastCommand, a.data.LastCwd = oldCmd, oldCwd
+		a.data.LastCommand = oldCmd
+		if created {
+			_ = os.Remove(cwd) // Still empty: no agent has used it.
+		}
 		return "", err
 	}
 	return t.ID, nil
+}
+
+func (a *App) workingDirectoryLocked() string {
+	if a.data.WorkingDirectory != "" {
+		return a.data.WorkingDirectory
+	}
+	return a.defaultWorkingDir
+}
+
+// newThreadDir creates a randomly named folder for one thread.
+func newThreadDir(root string) (string, error) {
+	if !filepath.IsAbs(root) {
+		return "", errors.New("choose an absolute working directory in Settings")
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("working directory: %w", err)
+	}
+	for range 8 {
+		var b [3]byte
+		_, _ = rand.Read(b[:])
+		dir := filepath.Join(root, time.Now().Format("2006-01-02")+"-"+hex.EncodeToString(b[:]))
+		err := os.Mkdir(dir, 0o755)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("create thread folder: %w", err)
+		}
+	}
+	return "", errors.New("could not choose a unique thread folder")
 }
 
 func (a *App) Archive(id string, archive bool) error {
@@ -256,7 +316,7 @@ func (a *App) Archive(id string, archive bool) error {
 		return err
 	}
 	if archive {
-		if r := a.runtimes[id]; r != nil && r.process != nil {
+		if r := a.runtimes[id]; r != nil {
 			a.detachLocked(r)
 		}
 	}
@@ -282,7 +342,7 @@ func (a *App) Delete(id string) error {
 		a.data.Threads = old
 		return err
 	}
-	if r := a.runtimes[id]; r != nil && r.process != nil {
+	if r := a.runtimes[id]; r != nil {
 		a.detachLocked(r)
 	}
 	delete(a.runtimes, id)
@@ -330,7 +390,7 @@ func (a *App) Send(id, text string) error {
 		return err
 	}
 	r.job, r.status, r.err, r.sessionError = j, "Connecting…", "", ""
-	r.echoTarget, r.echoText, r.echoEntry = text, "", ""
+	r.echo = promptEcho{}
 	a.notifyLocked()
 	config := *t.Thread
 	a.wg.Add(1)
@@ -344,7 +404,8 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	defer close(j.done)
 	p, err := a.connect(j.ctx, t, r)
 	a.mu.Lock()
-	r.Entries = append(r.Entries, state.Entry{ID: state.ID(), Role: "user", Text: text})
+	local := state.Entry{ID: state.ID(), Role: "user", Text: text}
+	r.Entries = append(r.Entries, local)
 	before := len(r.Entries)
 	a.notifyLocked()
 	a.mu.Unlock()
@@ -352,7 +413,7 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	if err == nil {
 		a.mu.Lock()
 		r.status, r.acceptUpdates = "Working…", true
-		r.echoTarget = text
+		r.echo = promptEcho{target: text, local: local.ID}
 		sessionID := r.session
 		a.notifyLocked()
 		a.mu.Unlock()
@@ -371,7 +432,7 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	}
 	defer a.mu.Unlock()
 	r.acceptUpdates = err == nil
-	r.echoTarget, r.echoText, r.echoEntry = "", "", ""
+	r.echo = promptEcho{}
 	r.status = ""
 	if current := a.threadLocked(t.ID); current != nil {
 		current.Running, current.Updated = false, time.Now()
@@ -397,9 +458,10 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 
 // connect always loads saved sessions with replay. A cached transcript is not
 // proof of freshness: another client may have changed the agent's history.
+// The session is opened on the shared connection for the thread's agent.
 func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.Process, error) {
 	a.mu.Lock()
-	p, session, closing := r.process, r.session, r.closing
+	closing := r.closing
 	identity := [3]string{t.AgentID, t.Command, t.SessionID}
 	if barrier := a.closingSessions[identity]; barrier != nil {
 		closing = barrier
@@ -412,44 +474,40 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 			return nil, ctx.Err()
 		}
 	}
-	if p != nil && p.Alive() && session != "" {
+	a.mu.Lock()
+	if r.live() {
+		p := r.conn.process
+		a.mu.Unlock()
 		return p, nil
 	}
-	if p != nil {
-		p.Close()
-	}
-	a.mu.Lock()
+	a.detachLocked(r) // A dead process: release it without waiting.
 	r.epoch++
 	epoch := r.epoch
 	r.initializing, r.initialUpdates, r.acceptUpdates = true, nil, false
-	r.session, r.echoTarget, r.echoText, r.echoEntry = "", "", "", ""
-	r.outputs = map[string]string{}
+	r.session, r.echo = "", promptEcho{}
+	r.outputs, r.tools = map[string]string{}, map[string]*toolCall{}
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); r.initializing = false; r.initialUpdates = nil; a.mu.Unlock() }()
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	p, err := agent.Start(initCtx, t.Command, t.Cwd, agent.Hooks{
-		Update: func(n acp.SessionNotification) { a.receive(t.ID, r, epoch, n) },
-		Terminal: func(session acp.SessionId, terminalID, output string) {
-			a.terminalOutput(t.ID, r, epoch, session, terminalID, output)
-		},
-		Permission: func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-			return a.permission(ctx, t.ID, r, epoch, req)
-		},
-	})
+	c, err := a.acquire(initCtx, t)
 	if err != nil {
 		return nil, err
 	}
-	a.mu.Lock()
-	r.process, r.identity = p, identity
-	a.mu.Unlock()
+	p := c.process
 	var sessionID string
 	var options []acp.SessionConfigOption
 	var modes *acp.SessionModeState
 	var meta map[string]any
+	creating := false
 	if len(t.AdditionalDirectories) > 0 && p.Info.AgentCapabilities.SessionCapabilities.AdditionalDirectories == nil {
 		err = errors.New("agent no longer supports this session's additional workspace directories")
 	} else if t.SessionID != "" {
+		// Route before loading so the replay reaches this thread.
+		a.mu.Lock()
+		c.routes[t.SessionID] = route{t.ID, r, epoch}
+		a.mu.Unlock()
+		p.OpenSession(t.SessionID, t.Cwd, t.AdditionalDirectories)
 		var loaded acp.LoadSessionResponse
 		loaded, err = p.Conn.LoadSession(initCtx, acp.LoadSessionRequest{SessionId: acp.SessionId(t.SessionID), Cwd: t.Cwd, AdditionalDirectories: t.AdditionalDirectories, McpServers: []acp.McpServer{}})
 		options, modes, meta = loaded.ConfigOptions, loaded.Modes, loaded.Meta
@@ -458,12 +516,35 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 			err = fmt.Errorf("cannot load session %s: %w. Retry or remove it from Mu; no replacement session was created", t.SessionID, err)
 		}
 	} else {
+		a.mu.Lock()
+		c.creating++
+		a.mu.Unlock()
+		creating = true
 		var session acp.NewSessionResponse
 		session, err = p.Conn.NewSession(initCtx, acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
 		sessionID = string(session.SessionId)
 		options, modes, meta = session.ConfigOptions, session.Modes, session.Meta
 	}
 	acknowledged := err == nil && sessionID != ""
+	// The SDK delivers notifications sent before a response first. Mark that
+	// boundary now: later buffered notifications are newer than the response.
+	a.mu.Lock()
+	if creating {
+		c.creating--
+		if acknowledged {
+			c.routes[sessionID] = route{t.ID, r, epoch}
+			r.initialUpdates = append(c.unrouted[sessionID], r.initialUpdates...)
+		}
+		delete(c.unrouted, sessionID)
+		if c.creating == 0 {
+			clear(c.unrouted)
+		}
+	}
+	boundary := len(r.initialUpdates)
+	a.mu.Unlock()
+	if creating && acknowledged {
+		p.OpenSession(sessionID, t.Cwd, nil)
+	}
 	if err == nil && sessionID == "" {
 		err = errors.New("agent returned an empty session ID")
 	}
@@ -472,23 +553,31 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	}
 	a.mu.Lock()
 	if err == nil && a.closed {
-		err = errors.New("app is closing")
+		err = errAppClosing
 	}
+	r.conn, r.identity = c, [3]string{t.AgentID, t.Command, sessionID}
 	if err == nil {
 		r.session, r.acceptUpdates = sessionID, true
-		r.identity[2] = sessionID
 		if current := a.threadLocked(t.ID); current != nil {
 			// Commit replay only after a successful response; failed loads never
 			// replace the previous in-memory projection with partial history.
 			current.Entries, current.Session, current.Notice = nil, state.Session{}, ""
 			current.SessionID = sessionID
-			current.Session.Options, current.Session.Modes = options, modes
-			storeMeta(&current.Session, "setup", meta)
-			for _, n := range r.initialUpdates {
-				if string(n.SessionId) == sessionID {
+			replay := func(updates []acp.SessionNotification) {
+				for _, n := range updates {
 					a.updateLocked(t.ID, r, n)
 				}
 			}
+			// Replay precedes the response, so state the response supplies wins.
+			replay(r.initialUpdates[:boundary])
+			if options != nil {
+				current.Session.Options = options
+			}
+			if modes != nil {
+				current.Session.Modes = modes
+			}
+			storeMeta(&current.Session, "setup", meta)
+			replay(r.initialUpdates[boundary:])
 			r.initializing, r.initialUpdates = false, nil
 			err = a.saveLocked()
 		}
@@ -497,7 +586,10 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		// Only close an acknowledged active session. A missing-session error
 		// must not be obscured by a second error closing a nonexistent session.
 		if acknowledged {
-			r.session, r.identity[2] = sessionID, sessionID
+			r.session = sessionID
+		} else if t.SessionID != "" {
+			delete(c.routes, t.SessionID)
+			p.ForgetSession(t.SessionID)
 		}
 		a.detachLocked(r)
 	}
@@ -515,29 +607,35 @@ func (a *App) Stop(id string) {
 		a.mu.Unlock()
 		return
 	}
-	j, p, session := r.job, r.process, r.session
+	j, session := r.job, r.session
 	j.stopping = true
 	close(j.stop)
 	r.status = "Stopping…"
 	a.notifyLocked()
-	if p == nil || session == "" {
+	if !r.live() {
 		j.cancel()
 		a.mu.Unlock()
 		return
 	}
 	j.stopDone = make(chan struct{})
+	p, deadline := r.conn.process, a.agentDeadline
 	a.mu.Unlock()
 	go func() {
 		defer close(j.stopDone)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = p.Conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(session)})
-		select {
-		case <-j.promptDone:
-			return
-		case <-ctx.Done():
+		// The deadline covers dispatching the cancellation as well as the
+		// agent's response: the write itself can block on an unread pipe.
+		// Terminating an unresponsive agent ends every session it serves.
+		err := p.Bounded(deadline, func(ctx context.Context) error {
+			_ = p.Conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(session)})
+			select {
+			case <-j.promptDone:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		if err != nil {
 			j.cancel()
-			p.Close()
 		}
 	}()
 }
@@ -586,27 +684,32 @@ func (a *App) Answer(id, permissionID string, option acp.PermissionOptionId) {
 	}
 }
 
-// Called with mu held. Invalidate callbacks before teardown and join detached
-// close work at shutdown. Reconnecting waits for this close barrier.
+// Called with mu held. Unroute the session, then close it on its connection
+// and release the connection; the last thread to release a connection
+// terminates its process. Reconnecting waits for this close barrier, and
+// shutdown joins the detached work.
 func (a *App) detachLocked(r *runtime) {
-	p, session := r.process, r.session
-	if p == nil {
+	c, session := r.conn, r.session
+	if c == nil {
 		return
 	}
-	r.process, r.session, r.acceptUpdates = nil, "", false
+	r.conn, r.session, r.acceptUpdates = nil, "", false
 	r.epoch++
+	if rt, ok := c.routes[session]; ok && rt.r == r {
+		delete(c.routes, session)
+	}
 	done := make(chan struct{})
 	r.closing = done
-	identity := r.identity
+	identity, deadline := r.identity, a.agentDeadline
 	if session != "" {
 		a.closingSessions[identity] = done
 	}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		err := p.CloseSession(session)
+		err := c.process.CloseSession(session, deadline)
 		a.mu.Lock()
-		defer a.mu.Unlock()
+		p := a.releaseLocked(c)
 		if err != nil {
 			r.sessionError = err.Error()
 			a.shutdownErrors = append(a.shutdownErrors, err)
@@ -619,6 +722,10 @@ func (a *App) detachLocked(r *runtime) {
 		}
 		close(done)
 		a.notifyLocked()
+		a.mu.Unlock()
+		if p != nil {
+			p.Close()
+		}
 	}()
 }
 
@@ -632,6 +739,11 @@ func (a *App) Close() error {
 	close(a.stopWriter)
 	if a.catalogCancel != nil {
 		a.catalogCancel()
+	}
+	for _, c := range a.connections {
+		if !c.started() {
+			c.cancel()
+		}
 	}
 	for _, r := range a.runtimes {
 		if r.job != nil {

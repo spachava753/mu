@@ -16,15 +16,15 @@ import (
 )
 
 type Entry struct {
-	ID         string `json:"id"`
-	Role       string `json:"role"`
-	Text       string `json:"text"`
-	ToolID     string `json:"toolId,omitempty"`
-	TerminalID string `json:"terminalId,omitempty"`
-	Title      string `json:"title,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Details    string `json:"details,omitempty"`
-	PlanID     string `json:"planId,omitempty"`
+	ID        string `json:"id"`
+	Role      string `json:"role"`
+	Text      string `json:"text"`
+	ToolID    string `json:"toolId,omitempty"`
+	MessageID string `json:"messageId,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Details   string `json:"details,omitempty"`
+	PlanID    string `json:"planId,omitempty"`
 }
 
 type Thread struct {
@@ -33,6 +33,7 @@ type Thread struct {
 	Command               string    `json:"command"`
 	AgentID               string    `json:"agentId,omitempty"`
 	AgentName             string    `json:"agentName,omitempty"`
+	ProjectID             string    `json:"projectId,omitempty"`
 	Cwd                   string    `json:"cwd"`
 	SessionID             string    `json:"sessionId,omitempty"`
 	ParentID              string    `json:"parentId,omitempty"`
@@ -68,12 +69,20 @@ type AgentConfig struct {
 	Command string `json:"command"`
 }
 
+// Project is a named folder that all of its threads work in.
+type Project struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Dir  string `json:"dir"`
+}
+
 type Data struct {
 	Agents           []AgentConfig `json:"agents,omitempty"`
+	Projects         []Project     `json:"projects,omitempty"`
 	DefaultAgentID   string        `json:"defaultAgentId,omitempty"`
 	SidebarCollapsed bool          `json:"sidebarCollapsed,omitempty"`
 	LastCommand      string        `json:"lastCommand,omitempty"`
-	LastCwd          string        `json:"lastCwd,omitempty"`
+	WorkingDirectory string        `json:"workingDirectory,omitempty"`
 	Threads          []Thread      `json:"threads"`
 }
 
@@ -94,6 +103,16 @@ func DefaultDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".local", "share", "mu"), nil
+}
+
+// DefaultWorkingDir is where new threads get their folders until the user
+// chooses another general working directory in Settings.
+func DefaultWorkingDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "mu"), nil
 }
 
 // Store owns an exclusive lock for its lifetime. A second app cannot lose another's edits.

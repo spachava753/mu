@@ -14,11 +14,11 @@ import (
 func composerFixture(t *testing.T, width, height int) (*app.App, *ui.Tester) {
 	t.Helper()
 	a := testApp(t)
-	_, err := a.Create(fmt.Sprintf("%q session-ui long-menus", testutil.Agent(t)), t.TempDir())
+	_, err := a.Create(fmt.Sprintf("%q session-ui long-menus", testutil.Agent(t)), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := desktop.New(a, "", "")
+	v := desktop.New(a, "")
 	tt := ui.NewTester(v.Draw, width, height)
 	tt.SetDark(true)
 	return a, tt

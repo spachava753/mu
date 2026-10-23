@@ -15,7 +15,7 @@ import (
 // TestQAConversation drives the real widgets and stdio transport together. The
 // fresh local fixture is deterministic and never invokes an external provider.
 func TestQAConversation(t *testing.T) {
-	a, err := app.Open(t.TempDir())
+	a, err := app.Open(t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestQAConversation(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	view := desktop.New(a, fmt.Sprintf("%q", testutil.Agent(t)), t.TempDir())
+	view := desktop.New(a, fmt.Sprintf("%q", testutil.Agent(t)))
 	tt := ui.NewTester(view.Draw, 1100, 780)
 	tt.Frame()
 	click := func(label string) {
@@ -122,7 +122,7 @@ func TestQAConversation(t *testing.T) {
 func TestQAThreadControls(t *testing.T) {
 	for _, size := range [][2]int{{1100, 780}, {800, 600}} {
 		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
-			a, err := app.Open(t.TempDir())
+			a, err := app.Open(t.TempDir(), t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,7 +131,7 @@ func TestQAThreadControls(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			view := desktop.New(a, testutil.Agent(t), t.TempDir())
+			view := desktop.New(a, testutil.Agent(t))
 			tt := ui.NewTester(view.Draw, size[0], size[1])
 			tt.Frame()
 			click := func(label string) {

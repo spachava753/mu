@@ -39,14 +39,13 @@ func (v *View) imports(c *ui.Context, s app.Snapshot) {
 			ui.Column(c).Width(190).Shrink(0).Children(func() {
 				selectChoice(c.Key("discovery-agent"), "Discovery agent", v.agentID, choices, s.Catalog.Loading, func(id string) { v.agentID = id; v.importSelected = map[string]bool{}; v.importNotice = "" })
 			})
-			ui.TextInput(c.Key("discovery-cwd"), &v.cwd).Label("Discovery working directory").Placeholder("/absolute/path/to/project").Grow(1).MinWidth(120)
-			ui.PrimaryButton(c, "Find sessions").Shrink(0).Disabled(s.Catalog.Loading || v.agentID == "" || strings.TrimSpace(v.cwd) == "").OnClick(func() {
+			ui.PrimaryButton(c, "Find sessions").Shrink(0).Disabled(s.Catalog.Loading || v.agentID == "").OnClick(func() {
 				v.importSelected = map[string]bool{}
 				v.importNotice = ""
-				v.fail(v.app.Discover(v.agentID, v.cwd))
+				v.fail(v.app.Discover(v.agentID))
 			})
 		})
-		ui.Text(c, "The working directory only starts the agent process. Discovery lists every session the agent exposes, across directories, and adds nothing automatically.").FontSize(11.5).TextColor(t.TextMuted)
+		ui.Text(c, "Discovery lists every session the agent exposes, across directories, and adds nothing automatically.").FontSize(11.5).TextColor(t.TextMuted)
 		if s.Catalog.Loading {
 			ui.Row(c).Gap(8).Padding(8, 0).Children(func() {
 				ui.Spinner(c).Size(14, 14)

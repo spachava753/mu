@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -32,12 +33,10 @@ func sameConnection(t state.Thread, c state.AgentConfig) bool {
 	return t.AgentID == c.ID && t.Command == c.Command
 }
 
-// Discover lists all pages on a separate process. Listing never creates or loads
-// a session, and an incomplete listing never reconciles the managed references.
-func (a *App) Discover(agentID, launchCwd string) error {
-	if !filepath.IsAbs(launchCwd) {
-		return errors.New("choose an absolute working directory for discovery")
-	}
+// Discover lists all pages on a separate process, started in the general
+// working directory. Listing never creates or loads a session, and an
+// incomplete listing never reconciles the managed references.
+func (a *App) Discover(agentID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
@@ -55,6 +54,13 @@ func (a *App) Discover(agentID, launchCwd string) error {
 	}
 	if a.catalogCancel != nil {
 		a.catalogCancel()
+	}
+	launchCwd := a.workingDirectoryLocked()
+	if !filepath.IsAbs(launchCwd) {
+		return errors.New("choose an absolute working directory in Settings")
+	}
+	if err := os.MkdirAll(launchCwd, 0o755); err != nil {
+		return fmt.Errorf("working directory: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	a.catalogGeneration++
@@ -91,10 +97,17 @@ func (a *App) Discover(agentID, launchCwd string) error {
 			r := a.runtimeLocked(t.ID)
 			if s, ok := found[t.SessionID]; ok {
 				r.Notice = ""
-				// cwd is immutable in ACP. Do not silently retarget filesystem delegation.
-				if s.Cwd != t.Cwd || !slices.Equal(s.AdditionalDirectories, t.AdditionalDirectories) {
-					r.Notice = "The agent reports different workspace roots. Remove and re-import this reference after checking the agent configuration."
+				// cwd is immutable in ACP, so a different one means this is not
+				// the session Mu imported. Do not retarget filesystem delegation.
+				if s.Cwd != t.Cwd {
+					r.Notice = "The agent reports a different working directory for this session. Remove and re-import this reference after checking the agent configuration."
 					continue
+				}
+				// Additional directories are inputs to each load, not identity.
+				// Keep the set accepted at import: listing metadata never
+				// expands which directories the agent may access through Mu.
+				if !slices.Equal(s.AdditionalDirectories, t.AdditionalDirectories) {
+					r.Notice = "The agent lists different additional directories for this session. Mu still loads it with the directories accepted at import."
 				}
 				if s.Title != "" {
 					t.Title = s.Title
@@ -199,7 +212,7 @@ func (a *App) Import(generation uint64, sessionIDs []string) ([]string, error) {
 		if err != nil {
 			updated = time.Now()
 		}
-		t := state.Thread{ID: state.ID(), SessionID: s.ID, Title: title, Command: c.Agent.Command, AgentID: c.Agent.ID, AgentName: c.Agent.Name, Cwd: s.Cwd, AdditionalDirectories: slices.Clone(s.AdditionalDirectories), Created: time.Now(), Updated: updated}
+		t := state.Thread{ID: state.ID(), SessionID: s.ID, Title: title, Command: c.Agent.Command, AgentID: c.Agent.ID, AgentName: c.Agent.Name, ProjectID: a.projectForDirLocked(s.Cwd), Cwd: s.Cwd, AdditionalDirectories: slices.Clone(s.AdditionalDirectories), Created: time.Now(), Updated: updated}
 		next = append(next, t)
 		ids = append(ids, t.ID)
 	}

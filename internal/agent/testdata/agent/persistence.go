@@ -23,8 +23,18 @@ type savedSession struct {
 	Updates               []json.RawMessage `json:"updates,omitempty"`
 }
 
-var active *savedSession
-var recording bool
+// Sessions open on this connection. Like real agents, one process serves
+// several sessions; close and fork reject sessions that are not open here.
+var open = map[string]*openSession{}
+
+type openSession struct {
+	*savedSession
+	recording   bool
+	pending     json.RawMessage
+	waiting     string
+	model, mode string
+	enabled     bool
+}
 
 func storeDir() string {
 	exe, _ := os.Executable()
@@ -68,9 +78,6 @@ func logCall(m message) {
 	_ = json.NewEncoder(f).Encode(m)
 }
 func recordNotification(v any) {
-	if !recording || active == nil {
-		return
-	}
 	b, _ := json.Marshal(v)
 	var n struct {
 		Method string
@@ -80,7 +87,8 @@ func recordNotification(v any) {
 		}
 	}
 	_ = json.Unmarshal(b, &n)
-	if n.Method != "session/update" || n.Params.SessionID != active.ID {
+	active := open[n.Params.SessionID]
+	if n.Method != "session/update" || active == nil || !active.recording {
 		return
 	}
 	var u struct {
@@ -96,9 +104,9 @@ func recordNotification(v any) {
 	}
 	active.Updates = append(active.Updates, n.Params.Update)
 	active.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	save(active)
+	save(active.savedSession)
 }
-func savePrompt(text string) {
+func savePrompt(active *savedSession, text string) {
 	b, _ := json.Marshal(map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"type": "text", "text": text}})
 	active.Updates = append(active.Updates, b)
 	save(active)

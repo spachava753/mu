@@ -28,17 +28,17 @@ func TestReloadWaitsForSessionCloseAndRejectsLateUpdates(t *testing.T) {
 
 func TestReimportWaitsForRemovedReferencesClose(t *testing.T) {
 	a := openTest(t, t.TempDir())
-	command, cwd := testutil.Agent(t)+" slow-close", t.TempDir()
+	command := testutil.Agent(t) + " slow-close"
 	config, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := a.CreateWithAgent(config, cwd)
+	id, err := a.CreateWithAgent(config, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	v := connected(t, a, id)
-	c := discoverDone(t, a, config, cwd)
+	c := discoverDone(t, a, config)
 	if c.Error != "" {
 		t.Fatal(c)
 	}

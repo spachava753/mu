@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -108,7 +110,34 @@ func (a *App) SetSidebarCollapsed(collapsed bool) error {
 	return nil
 }
 
-func (a *App) CreateWithAgent(agentID, cwd string) (string, error) {
+// SetWorkingDirectory sets the general working directory. Existing threads
+// keep their folders; only new threads are created in the new location.
+func (a *App) SetWorkingDirectory(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if !filepath.IsAbs(dir) {
+		return errors.New("enter an absolute path for the working directory")
+	}
+	dir = filepath.Clean(dir)
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		return errors.New("the working directory must be a folder")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return errors.New("app is closing")
+	}
+	old := a.data.WorkingDirectory
+	a.data.WorkingDirectory = dir
+	if err := a.saveLocked(); err != nil {
+		a.data.WorkingDirectory = old
+		return err
+	}
+	return nil
+}
+
+// CreateWithAgent starts a thread with a saved agent, in the project's folder
+// or, without a project, in a new folder of the general working directory.
+func (a *App) CreateWithAgent(agentID, projectID string) (string, error) {
 	a.mu.Lock()
 	var config state.AgentConfig
 	for _, c := range a.data.Agents {
@@ -121,5 +150,5 @@ func (a *App) CreateWithAgent(agentID, cwd string) (string, error) {
 	if config.ID == "" {
 		return "", errors.New("choose a configured agent in Settings")
 	}
-	return a.create(config.Command, cwd, config.ID, config.Name)
+	return a.create(config.Command, config.ID, config.Name, projectID)
 }
