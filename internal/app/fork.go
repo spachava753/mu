@@ -67,13 +67,19 @@ func (a *App) Fork(id string) (string, error) {
 	}
 	a.mu.Lock()
 	live := r.live() && r.conn.process == p && r.session == config.SessionID
+	c, timeout := r.conn, a.forkTimeout
 	a.mu.Unlock()
 	if !live {
 		return fail(errors.New("the source session is no longer connected"))
 	}
-	forkCtx, cancelFork := context.WithTimeout(ctx, 35*time.Second)
-	defer cancelFork()
-	result, err := p.Conn.UnstableForkSession(forkCtx, acp.UnstableForkSessionRequest{SessionId: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.UnstableMcpServer{}})
+	result, err := awaitCreation(a, c, timeout, func(ctx context.Context) (acp.UnstableForkSessionResponse, error) {
+		return p.Conn.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.UnstableMcpServer{}})
+	}, func(fork acp.UnstableForkSessionResponse) acp.SessionId {
+		if string(fork.SessionId) == config.SessionID {
+			return "" // Never close the source.
+		}
+		return fork.SessionId
+	})
 	if err != nil {
 		return fail(fmt.Errorf("fork session: %w", p.Error(err)))
 	}

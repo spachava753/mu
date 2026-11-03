@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -230,10 +231,19 @@ func TestProtocolEchoRequiresPromptPrefix(t *testing.T) {
 			UserMessageChunk: &acp.SessionUpdateUserMessageChunk{MessageId: &messageID, Content: acp.TextBlock(text)},
 		}})
 	}
-	chunk("ctx", "Context: repository rules")
+	// A message whose first chunk is not text is not the echo either.
+	link := "file:///rules.md"
+	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{
+		UserMessageChunk: &acp.SessionUpdateUserMessageChunk{MessageId: &link, Content: acp.ResourceLinkBlock("rules", link)},
+	}})
+	chunk(link, "h")
+	// A later chunk of the rejected message ("h") must not be taken as the echo.
+	chunk("ctx", "Context: ")
+	chunk("ctx", "h")
+	chunk("ctx", "ow to behave")
 	chunk("u1", "hello")
 	got := findThread(t, a, id).Entries
-	if len(got) != 2 || got[0].Text != "hello" || got[0].MessageID != "u1" || got[1].Text != "Context: repository rules" {
+	if len(got) != 3 || got[0].Text != "hello" || got[0].MessageID != "u1" || got[1].MessageID != link || got[2].Text != "Context: how to behave" {
 		t.Fatalf("agent message replaced the prompt: %+v", got)
 	}
 }
@@ -409,5 +419,344 @@ func TestRetiredStartupStaysRetired(t *testing.T) {
 	}
 	if n := connectionCount(a); n != 0 {
 		t.Fatalf("retired startup was published: %d connections", n)
+	}
+}
+
+// Stopping a new thread while session/new is pending does not abandon the
+// session the agent creates: the thread keeps it, and the prompt is not sent.
+func TestStopDuringSessionCreationKeepsSession(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command+" slow-new")
+	before := len(fixtureCalls(t, command))
+	if err := a.Send(id, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	waitCall(t, command, "session/new")
+	a.Stop(id)
+	v := await(t, a, id, func(v ThreadView) bool { return !v.Running })
+	if v.SessionID == "" || !v.Connected || !strings.HasPrefix(lastText(v), "Stopped.") {
+		t.Fatalf("created session was not kept: %+v", v)
+	}
+	if v := sendDone(t, a, id, "again"); lastText(v) != "Echo: again" {
+		t.Fatalf("kept session unusable: %+v", v)
+	}
+	calls := fixtureCalls(t, command)[before:]
+	if count(calls, "session/new") != 1 || count(calls, "session/prompt") != 1 || count(calls, "$/cancel_request") != 0 || count(calls, "session/close") != 0 {
+		t.Fatalf("session/new was abandoned or the stopped prompt sent: %v", calls)
+	}
+}
+
+// A session the agent creates after Mu stopped waiting is closed, not
+// orphaned: only the response names it.
+func TestLateSessionCreationIsClosed(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	a.mu.Lock()
+	a.loadTimeout = 200 * time.Millisecond
+	a.mu.Unlock()
+	id := createTest(t, a, command+" slow-new")
+	before := len(fixtureCalls(t, command))
+	if v := sendDone(t, a, id, "hello"); v.Error == "" || v.SessionID != "" {
+		t.Fatalf("creation did not time out: %+v", v)
+	}
+	waitCall(t, command, "session/close")
+	calls := fixtureCalls(t, command)[before:]
+	if count(calls, "$/cancel_request") != 0 || slices.Index(calls, "session/close") < slices.Index(calls, "session/new") {
+		t.Fatalf("late session was abandoned: %v", calls)
+	}
+}
+
+// A fork the agent completes after Mu stopped waiting is closed, and the
+// source stays usable.
+func TestLateForkIsClosed(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	a.mu.Lock()
+	a.forkTimeout = 200 * time.Millisecond
+	a.mu.Unlock()
+	id := createTest(t, a, command+" slow-fork")
+	sendDone(t, a, id, "hello")
+	before := len(fixtureCalls(t, command))
+	if forkID, err := a.Fork(id); err == nil || forkID != "" {
+		t.Fatalf("fork did not time out: %q %v", forkID, err)
+	}
+	waitCall(t, command, "session/close")
+	calls := fixtureCalls(t, command)[before:]
+	if count(calls, "$/cancel_request") != 0 || slices.Index(calls, "session/close") < slices.Index(calls, "session/fork") || len(a.Snapshot().Threads) != 1 {
+		t.Fatalf("late fork was abandoned: %v", calls)
+	}
+	if v := sendDone(t, a, id, "again"); lastText(v) != "Echo: again" {
+		t.Fatalf("source unusable: %+v", v)
+	}
+}
+
+// If closing a session created after Mu stopped waiting fails, the failure
+// and the session ID are reported, not discarded.
+func TestLateSessionCloseFailureIsReported(t *testing.T) {
+	for _, mode := range []string{"close-error", "wait-close"} {
+		t.Run(mode, func(t *testing.T) {
+			command := testutil.Agent(t)
+			a := openTest(t, t.TempDir())
+			a.mu.Lock()
+			a.loadTimeout = 200 * time.Millisecond
+			a.mu.Unlock()
+			id := createTest(t, a, command+" slow-new "+mode)
+			sendDone(t, a, id, "hello")
+			deadline := time.Now().Add(8 * time.Second)
+			for !strings.Contains(a.Snapshot().LifecycleError, "after Mu stopped waiting, and closing it failed") {
+				if time.Now().After(deadline) {
+					t.Fatalf("late close failure not reported: %q", a.Snapshot().LifecycleError)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := a.Close(); err == nil || !strings.Contains(err.Error(), "created session") {
+				t.Fatalf("shutdown hid the late close failure: %v", err)
+			}
+		})
+	}
+}
+
+// Shutdown joins a creation request that context cancellation cannot end,
+// like a write blocked on an agent that stopped reading, by closing its process.
+func TestShutdownJoinsBlockedCreation(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	a.mu.Lock()
+	a.agentDeadline = 300 * time.Millisecond
+	a.mu.Unlock()
+	c, err := a.acquire(context.Background(), "", testutil.Agent(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := func(context.Context) (acp.NewSessionResponse, error) {
+		<-c.process.Conn.Done() // Ignores cancellation until the process ends.
+		return acp.NewSessionResponse{}, errors.New("connection closed")
+	}
+	if _, err := awaitCreation(a, c, 50*time.Millisecond, blocked, func(s acp.NewSessionResponse) acp.SessionId { return s.SessionId }); err == nil {
+		t.Fatal("blocked creation did not time out")
+	}
+	a.release(c) // Only the request's own reference remains.
+	closed := make(chan error, 1)
+	go func() { closed <- a.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		c.process.Close() // Rescue the suite before failing.
+		t.Fatal("shutdown did not join the blocked creation")
+	}
+}
+
+// Opening an imported session waits for an outstanding close of it, such as
+// the cleanup of a session created after Mu stopped waiting.
+func TestLoadWaitsForLateSessionCleanup(t *testing.T) {
+	command := testutil.Agent(t) + " slow-new wait-close"
+	fixture := strings.Fields(command)[0]
+	a := openTest(t, t.TempDir())
+	a.mu.Lock()
+	a.loadTimeout = 200 * time.Millisecond
+	a.mu.Unlock()
+	agentID, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := a.CreateWithAgent(agentID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(fixtureCalls(t, fixture))
+	sendDone(t, a, first, "hello") // Times out; the late session's close never answers.
+	waitCall(t, fixture, "session/close")
+	c := discoverDone(t, a, agentID)
+	if c.Error != "" || len(c.Sessions) != 1 {
+		t.Fatalf("late session not discovered: %+v", c)
+	}
+	ids, err := a.Import(c.Generation, []string{c.Sessions[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Connect(ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if v := await(t, a, ids[0], func(v ThreadView) bool { return !v.Configuring }); !v.Connected {
+		t.Fatalf("imported session did not open after the cleanup: %+v", v)
+	}
+	// The close timed out and its process was killed; only then was the
+	// session loaded, on a replacement process.
+	calls := fixtureCalls(t, fixture)[before:]
+	load, closing := slices.Index(calls, "session/load"), slices.Index(calls, "session/close")
+	if load < 0 || !slices.Contains(calls[closing:load], "initialize") {
+		t.Fatalf("load raced the outstanding close: %v", calls)
+	}
+	if err := a.Close(); err == nil || !strings.Contains(err.Error(), c.Sessions[0].ID) {
+		t.Fatalf("late close failure not reported: %v", err)
+	}
+}
+
+// If the process ends while connect waits for a close of its session, the
+// session is loaded on a replacement process.
+func TestLoadAfterCloseEndedProcessUsesReplacement(t *testing.T) {
+	fixture := testutil.Agent(t)
+	command := fixture + " slow-init"
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command)
+	session := sendDone(t, a, id, "hello").SessionID
+	if err := a.Archive(id, true); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
+	if err := a.Archive(id, false); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fixtureCalls(t, fixture))
+	if err := a.Connect(id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Contains(fixtureCalls(t, fixture)[before:], "initialize") {
+		if time.Now().After(deadline) {
+			t.Fatal("connect did not start the agent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// While the agent initializes, a close of the session begins.
+	identity := [3]string{"", command, session}
+	closing := make(chan struct{})
+	a.mu.Lock()
+	a.closingSessions[identity] = closing
+	a.mu.Unlock()
+	var c *connection
+	for c == nil || !c.started() {
+		if time.Now().After(deadline) {
+			t.Fatal("agent did not start")
+		}
+		time.Sleep(time.Millisecond)
+		a.mu.Lock()
+		c = a.connections[[2]string{"", command}]
+		a.mu.Unlock()
+	}
+	// That close does not get an answer, so the process is ended.
+	c.process.Close()
+	a.mu.Lock()
+	delete(a.closingSessions, identity)
+	close(closing)
+	a.mu.Unlock()
+	if v := await(t, a, id, func(v ThreadView) bool { return !v.Configuring }); !v.Connected || v.SessionError != "" {
+		t.Fatalf("load used the ended process: %+v", v)
+	}
+	if calls := fixtureCalls(t, fixture)[before:]; count(calls, "initialize") != 2 || count(calls, "session/load") != 1 {
+		t.Fatalf("expected one load on a replacement process: %v", calls)
+	}
+}
+
+// A late cleanup leaves a close already in progress for the session to
+// finish, rather than replacing its barrier.
+func TestLateCleanupKeepsExistingClose(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	c, err := a.acquire(context.Background(), "", command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := [3]string{"", command, "late"}
+	existing := make(chan struct{})
+	a.mu.Lock()
+	a.closingSessions[identity] = existing
+	a.mu.Unlock()
+	before := len(fixtureCalls(t, command))
+	late := func(context.Context) (acp.NewSessionResponse, error) {
+		time.Sleep(100 * time.Millisecond)
+		return acp.NewSessionResponse{SessionId: "late"}, nil
+	}
+	if _, err := awaitCreation(a, c, 10*time.Millisecond, late, func(s acp.NewSessionResponse) acp.SessionId { return s.SessionId }); err == nil {
+		t.Fatal("creation did not time out")
+	}
+	a.release(c)
+	// The cleanup releases the last reference when it finishes.
+	deadline := time.Now().Add(5 * time.Second)
+	for connectionCount(a) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("late cleanup did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a.mu.Lock()
+	kept := a.closingSessions[identity] == existing
+	delete(a.closingSessions, identity)
+	close(existing)
+	a.mu.Unlock()
+	if !kept || slices.Contains(fixtureCalls(t, command)[before:], "session/close") {
+		t.Fatal("late cleanup replaced the outstanding close")
+	}
+}
+
+// Waiting for a session's close honors an expired deadline even when no
+// close is outstanding, so connect's retries stop at the load deadline.
+func TestSessionCloseWaitHonorsDeadline(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.mu.Lock()
+	err := a.awaitSessionClosedLocked(ctx, [3]string{"", "agent", "s"})
+	a.mu.Unlock()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expired wait succeeded: %v", err)
+	}
+}
+
+// A replacement attempt started late is bounded by the remaining load
+// deadline, not a fresh startup timeout.
+func TestReplacementAttemptStopsAtLoadDeadline(t *testing.T) {
+	fixture := testutil.Agent(t)
+	command := fixture + " slow-init"
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command)
+	session := sendDone(t, a, id, "hello").SessionID
+	if err := a.Archive(id, true); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
+	if err := a.Archive(id, false); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	a.loadTimeout = 700 * time.Millisecond
+	a.mu.Unlock()
+	before := len(fixtureCalls(t, fixture))
+	started := time.Now()
+	if err := a.Connect(id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Contains(fixtureCalls(t, fixture)[before:], "initialize") {
+		if time.Now().After(deadline) {
+			t.Fatal("connect did not start the agent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	identity := [3]string{"", command, session}
+	closing := make(chan struct{})
+	a.mu.Lock()
+	a.closingSessions[identity] = closing
+	a.mu.Unlock()
+	var c *connection
+	for c == nil || !c.started() {
+		if time.Now().After(deadline) {
+			t.Fatal("agent did not start")
+		}
+		time.Sleep(time.Millisecond)
+		a.mu.Lock()
+		c = a.connections[[2]string{"", command}]
+		a.mu.Unlock()
+	}
+	// The close ends the process; the replacement's 500ms initialization
+	// cannot finish within the remaining deadline.
+	c.process.Close()
+	a.mu.Lock()
+	delete(a.closingSessions, identity)
+	close(closing)
+	a.mu.Unlock()
+	v := await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
+	if elapsed := time.Since(started); v.Connected || v.SessionError == "" || elapsed > 950*time.Millisecond {
+		t.Fatalf("replacement outlived the load deadline (%s): %+v", elapsed, v)
 	}
 }

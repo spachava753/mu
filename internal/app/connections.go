@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/spachava753/mu/internal/agent"
@@ -207,6 +208,113 @@ func (a *App) stopLocked(key [2]string, stop func()) {
 		close(done)
 		a.mu.Unlock()
 	}()
+}
+
+// awaitCreation runs a request that creates an agent session, such as
+// session/new or session/fork, on a started connection. Only its response
+// names the session, so the request is never abandoned: if Mu stops waiting
+// after timeout, the request keeps its own reference to the connection, and a
+// session it creates late is closed. Only closing the app cancels it; a
+// request still outstanding a deadline later, such as a write blocked on an
+// agent that stopped reading, then closes the process.
+func awaitCreation[T any](a *App, c *connection, timeout time.Duration, request func(context.Context) (T, error), created func(T) acp.SessionId) (T, error) {
+	a.mu.Lock()
+	c.users++ // The request's own reference, released when it ends.
+	deadline := a.agentDeadline
+	a.mu.Unlock()
+	type outcome struct {
+		value T
+		err   error
+	}
+	done, finished := make(chan outcome, 1), make(chan struct{})
+	a.wg.Add(2)
+	go func() {
+		defer a.wg.Done()
+		value, err := request(a.ctx)
+		close(finished)
+		done <- outcome{value, err}
+	}()
+	go func() {
+		defer a.wg.Done()
+		select {
+		case <-finished:
+		case <-a.ctx.Done():
+			// A context cannot interrupt a blocked pipe write; closing the
+			// process does, so shutdown can join this request.
+			timer := time.NewTimer(deadline)
+			defer timer.Stop()
+			select {
+			case <-finished:
+			case <-timer.C:
+				c.process.Close()
+			}
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case o := <-done:
+		a.release(c)
+		return o.value, o.err
+	case <-timer.C:
+	}
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		defer a.release(c)
+		o := <-done
+		if o.err != nil || created(o.value) == "" {
+			return
+		}
+		session := string(created(o.value))
+		// Coordinate with loads of the same session, as a detached thread's
+		// close does: a thread that imported and opened it meanwhile keeps it,
+		// and a close already in progress, such as that thread's, suffices.
+		// Otherwise a load waits for this close.
+		identity := [3]string{c.key[0], c.key[1], session}
+		a.mu.Lock()
+		_, claimed := c.routes[session]
+		_, alreadyClosing := a.closingSessions[identity]
+		if claimed || alreadyClosing {
+			a.mu.Unlock()
+			return
+		}
+		closing := make(chan struct{})
+		a.closingSessions[identity] = closing
+		a.mu.Unlock()
+		err := c.process.CloseSession(session, deadline)
+		a.mu.Lock()
+		if a.closingSessions[identity] == closing {
+			delete(a.closingSessions, identity)
+		}
+		close(closing)
+		if err != nil {
+			a.shutdownErrors = append(a.shutdownErrors, fmt.Errorf("the agent created session %s after Mu stopped waiting, and closing it failed: %w", session, err))
+		}
+		a.notifyLocked()
+		a.mu.Unlock()
+	}()
+	var zero T
+	return zero, fmt.Errorf("the agent did not respond within %s; a session it creates later will be closed", timeout)
+}
+
+// awaitSessionClosedLocked waits, releasing the mutex meanwhile, until no
+// close of the session identity is outstanding.
+func (a *App) awaitSessionClosedLocked(ctx context.Context, identity [3]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for barrier := a.closingSessions[identity]; barrier != nil; barrier = a.closingSessions[identity] {
+		a.mu.Unlock()
+		select {
+		case <-barrier:
+		case <-ctx.Done():
+			a.mu.Lock()
+			return ctx.Err()
+		}
+		a.mu.Lock()
+	}
+	return nil
 }
 
 // keepLocked reports whether an idle connection keeps running. A saved agent's

@@ -278,14 +278,22 @@ func joinNonEmpty(sep string, values ...string) string {
 // from the prompt is an agent-authored user message and gets its own entry.
 func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 	e := &r.echo
-	if r.job == nil || e.target == "" || block.Text == nil {
+	if r.job == nil || e.target == "" {
 		return false
 	}
 	if id != "" {
 		if e.id == "" && e.text == "" {
-			// Adopt a message as the echo only if it starts like the prompt;
-			// otherwise it is the agent's own user message, shown separately.
-			if !strings.HasPrefix(e.target, block.Text.Text) {
+			// Adopt a message as the echo only if its first chunk is text that
+			// starts like the prompt; otherwise it is the agent's own user
+			// message, shown separately. The decision is made once per message.
+			if e.rejected[id] {
+				return false
+			}
+			if block.Text == nil || !strings.HasPrefix(e.target, block.Text.Text) {
+				if e.rejected == nil {
+					e.rejected = map[string]bool{}
+				}
+				e.rejected[id] = true
 				return false
 			}
 			e.id = id
@@ -294,6 +302,9 @@ func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 			return false
 		}
 	} else if e.id != "" {
+		return false
+	}
+	if block.Text == nil {
 		return false
 	}
 	e.text += block.Text.Text

@@ -135,6 +135,9 @@ func main() {
 			}
 			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": !noLoad, "sessionCapabilities": caps}, "agentInfo": map[string]any{"name": "test-agent", "version": "1"}})
 		case "session/new":
+			if slices.Contains(os.Args, "slow-new") {
+				time.Sleep(500 * time.Millisecond)
+			}
 			saved := newSaved(p.Cwd)
 			saved.AdditionalDirectories = p.AdditionalDirectories
 			save(saved)
@@ -173,6 +176,9 @@ func main() {
 			finish(s, "cancelled")
 			reply(m.ID, map[string]any{})
 		case "session/fork":
+			if slices.Contains(os.Args, "slow-fork") {
+				time.Sleep(500 * time.Millisecond)
+			}
 			if slices.Contains(os.Args, "wait-fork") {
 				continue
 			}

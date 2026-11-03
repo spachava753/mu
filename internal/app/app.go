@@ -128,22 +128,28 @@ type promptEcho struct {
 	id     string // agent message ID identified as the echo
 	text   string // echoed text received so far
 	entry  string // separate entry for a divergent echo without message IDs
+	// rejected holds agent message IDs whose first chunk did not start like
+	// the prompt; later chunks of those messages are never the echo.
+	rejected map[string]bool
 }
 
 type App struct {
-	mu                sync.Mutex
-	store             *state.Store
-	data              state.Data
-	runtimes          map[string]*runtime
-	changed           chan struct{}
-	stopWriter        chan struct{}
-	wg                sync.WaitGroup
-	closed            bool
-	dirty             bool
-	storageError      string
-	shutdownErrors    []error
-	closingSessions   map[[3]string]chan struct{}
-	permissionSeq     uint64
+	mu              sync.Mutex
+	store           *state.Store
+	data            state.Data
+	runtimes        map[string]*runtime
+	changed         chan struct{}
+	stopWriter      chan struct{}
+	wg              sync.WaitGroup
+	closed          bool
+	dirty           bool
+	storageError    string
+	shutdownErrors  []error
+	closingSessions map[[3]string]chan struct{}
+	permissionSeq   uint64
+	// ctx ends when the app closes; it bounds requests a Stop must not abandon.
+	ctx               context.Context
+	cancelCtx         context.CancelFunc
 	connections       map[[2]string]*connection
 	stopping          map[[2]string]chan struct{} // closed once a configuration's stopped processes exit
 	catalog           Catalog
@@ -154,9 +160,9 @@ type App struct {
 	// take before Mu terminates the agent process. Cancelling can involve
 	// finishing a tool call or other cleanup in the agent, so it is generous.
 	agentDeadline time.Duration
-	// discoveryTimeout bounds one discovery and loadTimeout one session
-	// load or creation; tests shorten them.
-	discoveryTimeout, loadTimeout time.Duration
+	// discoveryTimeout bounds one discovery, loadTimeout one session load
+	// or creation, and forkTimeout waiting for a fork; tests shorten them.
+	discoveryTimeout, loadTimeout, forkTimeout time.Duration
 }
 
 // AgentDeadline is how long Mu waits for an agent to end a cancelled turn or
@@ -170,7 +176,8 @@ func Open(dir, defaultWorkingDir string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a.ctx, a.cancelCtx = context.WithCancel(context.Background())
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -529,6 +536,7 @@ func stopReasonText(reason acp.StopReason) string {
 const (
 	startTimeout = 30 * time.Second
 	LoadTimeout  = 2 * time.Minute
+	forkTimeout  = 35 * time.Second
 )
 
 // connect always loads saved sessions with replay. A cached transcript is not
@@ -563,27 +571,60 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	r.tools = map[string]*toolCall{}
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); r.initializing = false; r.initialUpdates = nil; a.mu.Unlock() }()
-	startCtx, cancelStart := context.WithTimeout(ctx, startTimeout)
-	c, err := a.acquire(startCtx, t.AgentID, t.Command)
-	cancelStart()
-	if err != nil {
-		return nil, err
-	}
 	initCtx, cancel := context.WithTimeout(ctx, a.loadTimeout)
 	defer cancel()
-	p := c.process
+	unsupported := func(p *agent.Process) bool {
+		return len(t.AdditionalDirectories) > 0 && p.Info.AgentCapabilities.SessionCapabilities.AdditionalDirectories == nil
+	}
+	var c *connection
+	var p *agent.Process
+	var err error
+	loading := false
+	for {
+		// Every attempt, including replacements, is within the load deadline.
+		startCtx, cancelStart := context.WithTimeout(initCtx, startTimeout)
+		c, err = a.acquire(startCtx, t.AgentID, t.Command)
+		cancelStart()
+		if err != nil {
+			return nil, err
+		}
+		p = c.process
+		if t.SessionID == "" || unsupported(p) {
+			break
+		}
+		// Route before loading so the replay reaches this thread. A close of
+		// the session that began meanwhile, such as a late-creation cleanup,
+		// must finish first; routing it claims the session against new ones.
+		a.mu.Lock()
+		err = a.awaitSessionClosedLocked(initCtx, [3]string{t.AgentID, t.Command, t.SessionID})
+		if err == nil && !c.alive() {
+			// An unanswered close ended the process meanwhile: load on a
+			// replacement.
+			a.releaseLocked(c)
+			a.mu.Unlock()
+			if err := initCtx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err == nil {
+			c.routes[t.SessionID] = route{t.ID, r, epoch}
+			loading = true
+		}
+		a.mu.Unlock()
+		break
+	}
 	var sessionID string
 	var options []acp.SessionConfigOption
 	var modes *acp.SessionModeState
 	var meta map[string]any
 	creating := false
-	if len(t.AdditionalDirectories) > 0 && p.Info.AgentCapabilities.SessionCapabilities.AdditionalDirectories == nil {
+	if unsupported(p) {
 		err = errors.New("agent no longer supports this session's additional workspace directories")
-	} else if t.SessionID != "" {
-		// Route before loading so the replay reaches this thread.
-		a.mu.Lock()
-		c.routes[t.SessionID] = route{t.ID, r, epoch}
-		a.mu.Unlock()
+	} else if t.SessionID == "" {
+		creating = true
+	}
+	if loading {
 		var loaded acp.LoadSessionResponse
 		loaded, err = p.Conn.LoadSession(initCtx, acp.LoadSessionRequest{SessionId: acp.SessionId(t.SessionID), Cwd: t.Cwd, AdditionalDirectories: t.AdditionalDirectories, McpServers: []acp.McpServer{}})
 		options, modes, meta = loaded.ConfigOptions, loaded.Modes, loaded.Meta
@@ -591,13 +632,18 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		if err != nil {
 			err = fmt.Errorf("cannot load session %s: %w. Retry or remove it from Mu; no replacement session was created", t.SessionID, err)
 		}
-	} else {
+	}
+	if creating {
 		a.mu.Lock()
 		c.creating++
 		a.mu.Unlock()
-		creating = true
 		var session acp.NewSessionResponse
-		session, err = p.Conn.NewSession(initCtx, acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
+		// A Stop does not abandon session/new either: the agent may create
+		// the session anyway, and only the response says which. The thread
+		// keeps it, and run does not send the stopped prompt.
+		session, err = awaitCreation(a, c, a.loadTimeout, func(ctx context.Context) (acp.NewSessionResponse, error) {
+			return p.Conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
+		}, func(s acp.NewSessionResponse) acp.SessionId { return s.SessionId })
 		sessionID = string(session.SessionId)
 		options, modes, meta = session.ConfigOptions, session.Modes, session.Meta
 	}
@@ -622,7 +668,9 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		err = errors.New("agent returned an empty session ID")
 	}
 	if err == nil {
-		err = initCtx.Err()
+		if !creating {
+			err = initCtx.Err()
+		}
 	}
 	a.mu.Lock()
 	if err == nil && a.closed {
@@ -663,7 +711,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		// too; an agent without it answers -32002, which counts as closed.
 		if acknowledged {
 			r.session = sessionID
-		} else if t.SessionID != "" && initCtx.Err() != nil {
+		} else if loading && initCtx.Err() != nil {
 			r.session = t.SessionID
 		} else if t.SessionID != "" {
 			delete(c.routes, t.SessionID)
@@ -841,6 +889,7 @@ func (a *App) Close() error {
 	}
 	a.closed = true
 	close(a.stopWriter)
+	a.cancelCtx()
 	if a.catalogCancel != nil {
 		a.catalogCancel()
 	}
