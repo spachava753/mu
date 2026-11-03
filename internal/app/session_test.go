@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/testutil"
 )
 
@@ -29,7 +29,7 @@ func TestSessionOptionsAndAllUpdates(t *testing.T) {
 	if len(v.Entries) != 0 {
 		t.Fatal("connecting sent a prompt")
 	}
-	if len(v.Session.Options) != 3 || v.Session.Options[0].Select.CurrentValue != "fast" {
+	if len(v.Session.Options) != 3 || v.Session.Options[0].CurrentValue != "fast" {
 		t.Fatal("setup options missing", v.Session)
 	}
 	if len(v.Session.Commands) != 1 || v.Session.Usage == nil || v.Session.Usage.Used != 12000 {
@@ -42,21 +42,21 @@ func TestSessionOptionsAndAllUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	v = await(t, a, id, func(v ThreadView) bool { return !v.Configuring && v.Session.Usage.Used == 16000 })
-	if v.Session.Options[0].Select.CurrentValue != "deep" || v.Session.Options[1].Select.CurrentValue != "high" {
+	if v.Session.Options[0].CurrentValue != "deep" || v.Session.Options[1].CurrentValue != "high" {
 		t.Fatal("dependent options were not replaced", v.Session)
 	}
 	if err := a.SetOption(id, "enabled", true); err != nil {
 		t.Fatal(err)
 	}
 	v = await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
-	if !v.Session.Options[2].Boolean.CurrentValue {
+	if v.Session.Options[2].CurrentValue != true {
 		t.Fatal("boolean option not acknowledged")
 	}
 	if err := a.SetOption(id, "model", "reject"); err != nil {
 		t.Fatal(err)
 	}
 	v = await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
-	if v.SessionError == "" || v.Session.Options[0].Select.CurrentValue != "deep" {
+	if v.SessionError == "" || v.Session.Options[0].CurrentValue != "deep" {
 		t.Fatal("failed update was applied or error hidden")
 	}
 	v = sendDone(t, a, id, "updates")
@@ -66,7 +66,7 @@ func TestSessionOptionsAndAllUpdates(t *testing.T) {
 	if v.Session.TurnUsage == nil || v.Session.TurnUsage.TotalTokens != 30 || *v.Session.TurnUsage.CachedWriteTokens != 2 {
 		t.Fatal("turn usage lost", v.Session)
 	}
-	if v.Session.Modes.CurrentModeId != "code" || v.Session.Options[0].Select.CurrentValue != "deep" {
+	if v.Session.Modes.CurrentModeID != "code" || v.Session.Options[0].CurrentValue != "deep" {
 		t.Fatal("mode/config updates lost")
 	}
 	if len(v.Session.Metadata) == 0 {
@@ -100,12 +100,12 @@ func TestSessionOptionsAndAllUpdates(t *testing.T) {
 	}
 	// Snapshots share a read-only deep copy; even a caller that modifies it
 	// cannot reach the application's nested SDK values.
-	v.Session.Options[0].Select.Name = "corrupted"
+	v.Session.Options[0].Name = "corrupted"
 	v.Session.Metadata["test"] = []byte(`true`)
 	a.mu.Lock()
 	r := a.runtimes[id]
 	_, aliased := r.Session.Metadata["test"]
-	if r.Session.Options[0].Select.Name == "corrupted" || aliased {
+	if r.Session.Options[0].Name == "corrupted" || aliased {
 		a.mu.Unlock()
 		t.Fatal("snapshot aliases live session state")
 	}
@@ -137,7 +137,7 @@ func TestLegacyModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	v = await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
-	if v.Session.Modes.CurrentModeId != "code" {
+	if v.Session.Modes.CurrentModeID != "code" {
 		t.Fatal("mode change lost")
 	}
 }
@@ -176,7 +176,7 @@ func TestOptionsDuringTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
-	if !v.Running || v.Session.Options[0].Select.CurrentValue != "deep" {
+	if !v.Running || v.Session.Options[0].CurrentValue != "deep" {
 		t.Fatal("option change interfered with running turn")
 	}
 	a.Stop(id)
@@ -221,7 +221,7 @@ func TestIdleUpdatesAndStaleConnections(t *testing.T) {
 	r := a.runtimeLocked(id)
 	r.session, r.epoch, r.acceptUpdates = "s", 2, true
 	a.mu.Unlock()
-	u := acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{Used: 5, Size: 10}}}
+	u := acp.SessionNotification{SessionID: "s", Update: acp.UsageUpdateSessionUpdate(5, 10)}
 	receive := func(epoch uint64, n acp.SessionNotification) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -235,7 +235,7 @@ func TestIdleUpdatesAndStaleConnections(t *testing.T) {
 	if findThread(t, a, id).Session.Usage.Used != 5 {
 		t.Fatal("idle update dropped")
 	}
-	receive(2, acp.SessionNotification{SessionId: "s", Update: acp.UpdateUserMessageText("agent-originated user message")})
+	receive(2, acp.SessionNotification{SessionID: "s", Update: acp.UserMessageChunkSessionUpdate(acp.TextContentBlock("agent-originated user message"))})
 	if lastText(findThread(t, a, id)) != "agent-originated user message" {
 		t.Fatal("live user message update dropped")
 	}

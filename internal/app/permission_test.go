@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
 )
@@ -159,7 +159,7 @@ func TestBufferedToolUpdateRefreshesPermission(t *testing.T) {
 	a, id, r := protocolRuntime(t)
 	a.mu.Lock()
 	r.initializing = true
-	r.pending["p"] = &pending{Permission: Permission{ID: "p", Request: acp.RequestPermissionRequest{SessionId: "s", ToolCall: acp.ToolCallUpdate{ToolCallId: "tool"}}}}
+	r.pending["p"] = &pending{Permission: Permission{ID: "p", Request: acp.RequestPermissionRequest{SessionID: "s", ToolCall: acp.ToolCallUpdate{ToolCallID: "tool"}}}}
 	a.mu.Unlock()
 	drain := func() {
 		select {
@@ -171,7 +171,7 @@ func TestBufferedToolUpdateRefreshesPermission(t *testing.T) {
 		t.Helper()
 		drain()
 		a.mu.Lock()
-		a.receiveLocked(id, r, r.epoch, acp.SessionNotification{SessionId: "s", Update: update})
+		a.receiveLocked(id, r, r.epoch, acp.SessionNotification{SessionID: "s", Update: update})
 		a.mu.Unlock()
 		select {
 		case <-a.Changes():
@@ -179,12 +179,15 @@ func TestBufferedToolUpdateRefreshesPermission(t *testing.T) {
 			t.Fatal("buffered update did not signal a change")
 		}
 	}
-	deliver(acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{ToolCallId: "tool", Title: "Run", Kind: acp.ToolKindExecute}})
+	run := toolCallUpdate("tool", "Run")
+	kind := acp.ToolKindExecute
+	run.Kind = &kind
+	deliver(run)
 	if v := findThread(t, a, id); v.Permissions[0].Tool.Title != "Run" || len(v.Entries) != 0 {
 		t.Fatalf("buffered tool call: %+v", v)
 	}
 	title := "Run tests"
-	deliver(acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{ToolCallId: "tool", Title: &title}})
+	deliver(toolPatchUpdate("tool", func(u *acp.SessionUpdate) { u.Title = &title }))
 	if v := findThread(t, a, id); v.Permissions[0].Tool.Title != title || v.Permissions[0].Tool.Kind != "execute" || len(v.Entries) != 0 {
 		t.Fatalf("buffered tool call update: %+v", v)
 	}

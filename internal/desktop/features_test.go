@@ -149,7 +149,7 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				for _, v := range s.Threads {
 					if v.ID == first {
-						return !v.Configuring && v.Session.Options[0].Select.CurrentValue == "deep"
+						return !v.Configuring && v.Session.Options[0].CurrentValue == "deep"
 					}
 				}
 				return false

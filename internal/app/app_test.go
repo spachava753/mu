@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/testutil"
 )
 
@@ -300,19 +300,21 @@ func TestUpdateReductionAndToolExtensions(t *testing.T) {
 	r.acceptUpdates = true
 	a.mu.Unlock()
 	for _, text := range []string{"hello ", "world"} {
-		a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.UpdateAgentMessageText(text)})
+		a.update(id, r, acp.SessionNotification{SessionID: "s", Update: acp.AgentMessageChunkSessionUpdate(acp.TextContentBlock(text))})
 	}
 	if got := findThread(t, a, id).Entries; len(got) != 1 || got[0].Text != "hello world" {
 		t.Fatal(got)
 	}
-	a.update(id, r, acp.SessionNotification{SessionId: "wrong", Update: acp.UpdateAgentMessageText("ignore")})
+	a.update(id, r, acp.SessionNotification{SessionID: "wrong", Update: acp.AgentMessageChunkSessionUpdate(acp.TextContentBlock("ignore"))})
 	// Mu runs no terminals: a terminal reference is shown as a placeholder.
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{ToolCallId: "tool", Title: "Run", Content: []acp.ToolCallContent{acp.ToolTerminalRef("term")}}}})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: toolCallUpdate("tool", "Run", acp.TerminalToolCallContent("term"))})
 	if got := lastText(findThread(t, a, id)); got != "Terminal: term\n" {
 		t.Fatalf("terminal reference: %q", got)
 	}
 	// Extension metadata is retained for inspection but is not a terminal transport.
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{ToolCallId: "tool", Meta: map[string]any{"terminal_output": map[string]any{"terminal_id": "term", "data": " delta"}}}}})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: toolPatchUpdate("tool", func(u *acp.SessionUpdate) {
+		u.Meta = acp.Meta{"terminal_output": map[string]any{"terminal_id": "term", "data": " delta"}}
+	})})
 	if v := findThread(t, a, id); lastText(v) != "Terminal: term\n" || !strings.Contains(v.Entries[len(v.Entries)-1].Details, "terminal_output") {
 		t.Fatal("metadata changed terminal output or was dropped", v.Entries)
 	}

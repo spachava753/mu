@@ -6,46 +6,53 @@ import (
 	"slices"
 	"strings"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
 )
 
 func contentText(b acp.ContentBlock) string {
-	switch {
-	case b.Text != nil:
-		return b.Text.Text
-	case b.ResourceLink != nil:
-		return b.ResourceLink.Name + " (" + b.ResourceLink.Uri + ")"
-	case b.Image != nil:
-		return "\n[Image: " + b.Image.MimeType + "; see content details.]\n"
-	case b.Audio != nil:
-		return "\n[Audio: " + b.Audio.MimeType + "; see content details.]\n"
-	case b.Resource != nil:
-		if b.Resource.Resource.TextResourceContents != nil {
-			return b.Resource.Resource.TextResourceContents.Text
+	switch b.Type {
+	case acp.ContentBlockTypeText:
+		return b.Text
+	case acp.ContentBlockTypeResourceLink:
+		return b.Name + " (" + deref(b.URI) + ")"
+	case acp.ContentBlockTypeImage:
+		return "\n[Image: " + deref(b.MimeType) + "; see content details.]\n"
+	case acp.ContentBlockTypeAudio:
+		return "\n[Audio: " + deref(b.MimeType) + "; see content details.]\n"
+	case acp.ContentBlockTypeResource:
+		if b.Resource.Text != nil {
+			return *b.Resource.Text
 		}
 		return "\n[Binary resource; see content details.]\n"
 	}
 	return ""
 }
 
+func deref[T any](v *T) T {
+	var zero T
+	if v == nil {
+		return zero
+	}
+	return *v
+}
+
 func toolText(content []acp.ToolCallContent, raw any) string {
 	var b strings.Builder
 	for _, c := range content {
-		if c.Content != nil {
-			b.WriteString(contentText(c.Content.Content))
+		switch c.Type {
+		case acp.ToolCallContentTypeContent:
+			b.WriteString(contentText(c.Content))
 			b.WriteByte('\n')
-		}
-		if c.Diff != nil {
-			b.WriteString("File: " + c.Diff.Path + "\n")
-			if c.Diff.OldText != nil {
-				b.WriteString("Before:\n" + *c.Diff.OldText + "\n")
+		case acp.ToolCallContentTypeDiff:
+			b.WriteString("File: " + c.Path + "\n")
+			if c.OldText != nil {
+				b.WriteString("Before:\n" + *c.OldText + "\n")
 			}
-			b.WriteString("After:\n" + c.Diff.NewText + "\n")
-		}
-		if c.Terminal != nil {
+			b.WriteString("After:\n" + c.NewText + "\n")
+		case acp.ToolCallContentTypeTerminal:
 			// Mu runs no terminals, so it has no output for this reference.
-			b.WriteString("Terminal: " + c.Terminal.TerminalId + "\n")
+			b.WriteString("Terminal: " + string(c.TerminalID) + "\n")
 		}
 	}
 	if b.Len() == 0 && raw != nil {
@@ -69,38 +76,6 @@ func storeMeta(s *state.Session, source string, meta map[string]any) bool {
 		s.Metadata[source] = b
 	}
 	return err == nil
-}
-
-// updateMeta returns an update's kind and _meta. The SDK's session info
-// variant does not decode _meta.
-func updateMeta(u acp.SessionUpdate) (string, map[string]any) {
-	switch {
-	case u.UserMessageChunk != nil:
-		return "user_message_chunk", u.UserMessageChunk.Meta
-	case u.AgentMessageChunk != nil:
-		return "agent_message_chunk", u.AgentMessageChunk.Meta
-	case u.AgentThoughtChunk != nil:
-		return "agent_thought_chunk", u.AgentThoughtChunk.Meta
-	case u.ToolCall != nil:
-		return "tool_call", u.ToolCall.Meta
-	case u.ToolCallUpdate != nil:
-		return "tool_call_update", u.ToolCallUpdate.Meta
-	case u.Plan != nil:
-		return "plan", u.Plan.Meta
-	case u.PlanUpdate != nil:
-		return "plan_update", u.PlanUpdate.Meta
-	case u.PlanRemoved != nil:
-		return "plan_removed", u.PlanRemoved.Meta
-	case u.AvailableCommandsUpdate != nil:
-		return "available_commands_update", u.AvailableCommandsUpdate.Meta
-	case u.CurrentModeUpdate != nil:
-		return "current_mode_update", u.CurrentModeUpdate.Meta
-	case u.ConfigOptionUpdate != nil:
-		return "config_option_update", u.ConfigOptionUpdate.Meta
-	case u.UsageUpdate != nil:
-		return "usage_update", u.UsageUpdate.Meta
-	}
-	return "", nil
 }
 
 // A connection generation prevents late notifications from a closed process
@@ -127,7 +102,7 @@ func (a *App) update(id string, r *runtime, n acp.SessionNotification) {
 }
 
 func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
-	if r.session != string(n.SessionId) {
+	if r.session != string(n.SessionID) {
 		return
 	}
 	t := a.threadLocked(id)
@@ -136,88 +111,77 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 	}
 	u := n.Update
 	// Preserve extension metadata without guessing provider-specific semantics.
-	kind, meta := updateMeta(u)
 	sessionChanged := storeMeta(&t.Session, "notification", n.Meta)
-	sessionChanged = storeMeta(&t.Session, kind, meta) || sessionChanged
-	switch {
-	case u.UserMessageChunk != nil:
-		c := u.UserMessageChunk
-		if r.acceptUpdates && !echoLocked(t, r, messageID(c.MessageId), c.Content) {
-			appendChunk(t, "user", messageID(c.MessageId), c.Content)
+	sessionChanged = storeMeta(&t.Session, string(u.SessionUpdate), u.Meta) || sessionChanged
+	switch u.SessionUpdate {
+	case acp.SessionUpdateTypeUserMessageChunk:
+		block, _ := u.Content.(acp.ContentBlock)
+		if r.acceptUpdates && !echoLocked(t, r, messageID(u.MessageID), block) {
+			appendChunk(t, "user", messageID(u.MessageID), block)
 		}
-	case u.AgentMessageChunk != nil:
-		if r.acceptUpdates {
-			appendChunk(t, "assistant", messageID(u.AgentMessageChunk.MessageId), u.AgentMessageChunk.Content)
+	case acp.SessionUpdateTypeAgentMessageChunk:
+		if block, _ := u.Content.(acp.ContentBlock); r.acceptUpdates {
+			appendChunk(t, "assistant", messageID(u.MessageID), block)
 		}
-	case u.AgentThoughtChunk != nil:
-		if r.acceptUpdates {
-			appendChunk(t, "thought", messageID(u.AgentThoughtChunk.MessageId), u.AgentThoughtChunk.Content)
+	case acp.SessionUpdateTypeAgentThoughtChunk:
+		if block, _ := u.Content.(acp.ContentBlock); r.acceptUpdates {
+			appendChunk(t, "thought", messageID(u.MessageID), block)
 		}
-	case u.ToolCall != nil:
+	case acp.SessionUpdateTypeToolCall, acp.SessionUpdateTypeToolCallUpdate:
 		if !r.acceptUpdates {
 			break
 		}
-		v := u.ToolCall
-		call := newToolCall(v)
-		r.tools[string(v.ToolCallId)] = call
-		if r.job != nil && !r.initializing { // Not replayed history.
-			r.turnTools[string(v.ToolCallId)] = true
-		}
-		renderTool(t, string(v.ToolCallId), call)
-	case u.ToolCallUpdate != nil:
-		if !r.acceptUpdates {
-			break
-		}
-		v := u.ToolCallUpdate
-		call := r.tools[string(v.ToolCallId)]
-		if call == nil {
+		id := string(u.ToolCallID)
+		call := r.tools[id]
+		if call == nil || u.SessionUpdate == acp.SessionUpdateTypeToolCall {
 			call = &toolCall{}
-			r.tools[string(v.ToolCallId)] = call
+			r.tools[id] = call
 		}
-		call.patch(v)
+		call.patch(updatePatch(u))
 		if r.job != nil && !r.initializing { // Not replayed history.
-			r.turnTools[string(v.ToolCallId)] = true
+			r.turnTools[id] = true
 		}
-		renderTool(t, string(v.ToolCallId), call)
-	case u.Plan != nil:
-		setPlan(t, "legacy", planText(u.Plan.Entries), pretty(u.Plan))
-	case u.PlanUpdate != nil:
-		p := u.PlanUpdate.Plan
-		switch {
-		case p.Items != nil:
-			setPlan(t, string(p.Items.Id), planText(p.Items.Entries), pretty(p))
-		case p.Markdown != nil:
-			setPlan(t, string(p.Markdown.Id), p.Markdown.Content, pretty(p))
-		case p.File != nil:
-			setPlan(t, string(p.File.Id), "Plan file: "+p.File.Uri, pretty(p))
+		renderTool(t, id, call)
+	case acp.SessionUpdateTypePlan:
+		setPlan(t, "legacy", planText(u.Entries), pretty(u.Entries))
+	case acp.SessionUpdateTypePlanUpdate:
+		p := u.Plan
+		switch p.Type {
+		case acp.PlanUpdateContentTypeItems:
+			setPlan(t, string(p.PlanID), planText(p.Entries), pretty(p))
+		case acp.PlanUpdateContentTypeMarkdown:
+			setPlan(t, string(p.PlanID), p.Content, pretty(p))
+		case acp.PlanUpdateContentTypeFile:
+			setPlan(t, string(p.PlanID), "Plan file: "+p.URI, pretty(p))
 		}
-	case u.PlanRemoved != nil:
-		t.Entries = slices.DeleteFunc(t.Entries, func(e state.Entry) bool { return e.Role == "plan" && e.PlanID == string(u.PlanRemoved.Id) })
-	case u.AvailableCommandsUpdate != nil:
-		t.Session.Commands = u.AvailableCommandsUpdate.AvailableCommands
+	case acp.SessionUpdateTypePlanRemoved:
+		t.Entries = slices.DeleteFunc(t.Entries, func(e state.Entry) bool { return e.Role == "plan" && e.PlanID == string(u.PlanID) })
+	case acp.SessionUpdateTypeAvailableCommandsUpdate:
+		t.Session.Commands = u.AvailableCommands
 		sessionChanged = true
-	case u.ConfigOptionUpdate != nil:
-		t.Session.Options = u.ConfigOptionUpdate.ConfigOptions
+	case acp.SessionUpdateTypeConfigOptionUpdate:
+		t.Session.Options = u.ConfigOptions
 		sessionChanged = true
-	case u.CurrentModeUpdate != nil:
-		if t.Session.Modes == nil {
-			t.Session.Modes = &acp.SessionModeState{}
+	case acp.SessionUpdateTypeCurrentModeUpdate:
+		modes := acp.SessionModeState{}
+		if t.Session.Modes != nil {
+			modes = *t.Session.Modes
 		}
-		t.Session.Modes.CurrentModeId = u.CurrentModeUpdate.CurrentModeId
+		modes.CurrentModeID = u.CurrentModeID
+		t.Session.Modes = &modes
 		r.modeUpdates++
 		sessionChanged = true
-	case u.SessionInfoUpdate != nil:
-		v := u.SessionInfoUpdate
-		if v.Title != nil && strings.TrimSpace(*v.Title) != "" && *v.Title != t.Title {
-			t.Title = *v.Title
+	case acp.SessionUpdateTypeSessionInfoUpdate:
+		if u.Title != nil && strings.TrimSpace(*u.Title) != "" && *u.Title != t.Title {
+			t.Title = *u.Title
 			a.dirty = true // The title is the only persisted field an update changes.
 		}
-		if v.UpdatedAt != nil {
-			t.Session.AgentUpdatedAt = *v.UpdatedAt
+		if u.UpdatedAt != nil {
+			t.Session.AgentUpdatedAt = *u.UpdatedAt
 			sessionChanged = true
 		}
-	case u.UsageUpdate != nil:
-		t.Session.Usage = u.UsageUpdate
+	case acp.SessionUpdateTypeUsageUpdate:
+		t.Session.Usage = &state.Usage{Used: u.Used, Size: u.Size, Cost: u.Cost}
 		sessionChanged = true
 	}
 	if sessionChanged {
@@ -226,12 +190,7 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 	a.notifyLocked()
 }
 
-func messageID(id *string) string {
-	if id == nil {
-		return ""
-	}
-	return *id
-}
+func messageID(id *acp.MessageId) string { return string(deref(id)) }
 
 // appendChunk groups chunks by the agent's message ID. Agents may omit IDs in
 // ACP v1; only then are adjacent same-role text chunks treated as one message.
@@ -248,7 +207,7 @@ func appendChunk(t *thread, role, id string, block acp.ContentBlock) {
 				break
 			}
 		}
-	} else if last := len(t.Entries) - 1; last >= 0 && t.Entries[last].Role == role && t.Entries[last].MessageID == "" && block.Text != nil {
+	} else if last := len(t.Entries) - 1; last >= 0 && t.Entries[last].Role == role && t.Entries[last].MessageID == "" && block.Type == acp.ContentBlockTypeText {
 		i = last
 	}
 	if i < 0 {
@@ -256,7 +215,7 @@ func appendChunk(t *thread, role, id string, block acp.ContentBlock) {
 		i = len(t.Entries) - 1
 	}
 	t.Entries[i].Text += text
-	if block.Text == nil {
+	if block.Type != acp.ContentBlockTypeText {
 		t.Entries[i].Details = joinNonEmpty("\n", t.Entries[i].Details, pretty(block))
 	}
 }
@@ -289,7 +248,7 @@ func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 			if e.rejected[id] {
 				return false
 			}
-			if block.Text == nil || !strings.HasPrefix(e.target, block.Text.Text) {
+			if block.Type != acp.ContentBlockTypeText || !strings.HasPrefix(e.target, block.Text) {
 				if e.rejected == nil {
 					e.rejected = map[string]bool{}
 				}
@@ -304,10 +263,10 @@ func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 	} else if e.id != "" {
 		return false
 	}
-	if block.Text == nil {
+	if block.Type != acp.ContentBlockTypeText {
 		return false
 	}
-	e.text += block.Text.Text
+	e.text += block.Text
 	local := entryByID(t, e.local)
 	if id != "" {
 		if local != nil {
@@ -363,8 +322,30 @@ func (c *toolCall) finished() bool {
 	return c.Status == acp.ToolCallStatusCompleted || c.Status == acp.ToolCallStatusFailed
 }
 
-func newToolCall(v *acp.SessionUpdateToolCall) *toolCall {
-	return &toolCall{Title: v.Title, Kind: v.Kind, Status: v.Status, Content: v.Content, Locations: v.Locations, RawInput: v.RawInput, RawOutput: v.RawOutput, Meta: v.Meta}
+// toolPatch holds the fields a tool call notification or permission request
+// supplies; nil fields are left unchanged.
+type toolPatch struct {
+	Title     *string
+	Kind      *acp.ToolKind
+	Status    *acp.ToolCallStatus
+	Content   *[]acp.ToolCallContent
+	Locations *[]acp.ToolCallLocation
+	RawInput  any
+	RawOutput any
+	Meta      acp.Meta
+}
+
+// updatePatch reads a tool_call or tool_call_update. The SDK decodes the
+// content of the former as a slice and of the latter as an optional slice.
+func updatePatch(u acp.SessionUpdate) toolPatch {
+	p := toolPatch{Title: u.Title, Kind: u.Kind, Status: u.Status, Locations: u.Locations, RawInput: u.RawInput, RawOutput: u.RawOutput, Meta: u.Meta}
+	switch content := u.Content.(type) {
+	case []acp.ToolCallContent:
+		p.Content = &content
+	case *[]acp.ToolCallContent:
+		p.Content = content
+	}
+	return p
 }
 
 // bufferedTool projects one tool call from setup notifications that are
@@ -372,20 +353,26 @@ func newToolCall(v *acp.SessionUpdateToolCall) *toolCall {
 func bufferedTool(updates []acp.SessionNotification, id string) *toolCall {
 	var call *toolCall
 	for _, n := range updates {
-		switch u := n.Update; {
-		case u.ToolCall != nil && string(u.ToolCall.ToolCallId) == id:
-			call = newToolCall(u.ToolCall)
-		case u.ToolCallUpdate != nil && string(u.ToolCallUpdate.ToolCallId) == id:
+		u := n.Update
+		if string(u.ToolCallID) != id {
+			continue
+		}
+		switch u.SessionUpdate {
+		case acp.SessionUpdateTypeToolCall:
+			call = &toolCall{}
+		case acp.SessionUpdateTypeToolCallUpdate:
 			if call == nil {
 				call = &toolCall{}
 			}
-			call.patch(u.ToolCallUpdate)
+		default:
+			continue
 		}
+		call.patch(updatePatch(u))
 	}
 	return call
 }
 
-func (c *toolCall) patch(u *acp.SessionToolCallUpdate) {
+func (c *toolCall) patch(u toolPatch) {
 	if u.Title != nil {
 		c.Title = *u.Title
 	}
@@ -396,10 +383,10 @@ func (c *toolCall) patch(u *acp.SessionToolCallUpdate) {
 		c.Status = *u.Status
 	}
 	if u.Content != nil {
-		c.Content = u.Content
+		c.Content = *u.Content
 	}
 	if u.Locations != nil {
-		c.Locations = u.Locations
+		c.Locations = *u.Locations
 	}
 	if u.RawInput != nil {
 		c.RawInput = u.RawInput
@@ -442,7 +429,7 @@ func permissionTool(known *toolCall, u acp.ToolCallUpdate) PermissionTool {
 	if known != nil {
 		call = *known
 	}
-	call.patch(&acp.SessionToolCallUpdate{Title: u.Title, Kind: u.Kind, Status: u.Status, Content: u.Content, Locations: u.Locations, RawInput: u.RawInput, RawOutput: u.RawOutput, Meta: u.Meta})
+	call.patch(toolPatch{Title: u.Title, Kind: u.Kind, Status: u.Status, Content: u.Content, Locations: u.Locations, RawInput: u.RawInput, RawOutput: u.RawOutput, Meta: u.Meta})
 	var b strings.Builder
 	for _, l := range call.Locations {
 		b.WriteString(l.Path)

@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
 )
@@ -258,7 +258,7 @@ func (a *App) Snapshot() Snapshot {
 			pending := slices.SortedFunc(maps.Values(r.pending), func(a, b *pending) int { return cmp.Compare(a.seq, b.seq) })
 			for _, p := range pending {
 				permission := p.Permission
-				toolID := string(p.Request.ToolCall.ToolCallId)
+				toolID := string(p.Request.ToolCall.ToolCallID)
 				known := r.tools[toolID]
 				if r.initializing {
 					// While loading, the session's updates are still buffered.
@@ -455,7 +455,7 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	before := len(r.Entries)
 	a.notifyLocked()
 	a.mu.Unlock()
-	var result acp.PromptResponse
+	result := &acp.PromptResponse{}
 	if err == nil {
 		a.mu.Lock()
 		if j.stopping {
@@ -470,9 +470,11 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 			sessionID := r.session
 			a.notifyLocked()
 			a.mu.Unlock()
-			result, err = p.Conn.Prompt(j.ctx, acp.PromptRequest{SessionId: acp.SessionId(sessionID), Prompt: []acp.ContentBlock{acp.TextBlock(text)}})
-			if err != nil {
+			response, promptErr := p.Conn.SessionPrompt(j.ctx, &acp.PromptRequest{SessionID: acp.SessionId(sessionID), Prompt: []acp.ContentBlock{acp.TextContentBlock(text)}})
+			if err = promptErr; err != nil {
 				err = p.Error(err)
+			} else {
+				result = response
 			}
 		}
 	}
@@ -574,7 +576,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	initCtx, cancel := context.WithTimeout(ctx, a.loadTimeout)
 	defer cancel()
 	unsupported := func(p *agent.Process) bool {
-		return len(t.AdditionalDirectories) > 0 && p.Info.AgentCapabilities.SessionCapabilities.AdditionalDirectories == nil
+		return len(t.AdditionalDirectories) > 0 && !p.AdditionalDirectories()
 	}
 	var c *connection
 	var p *agent.Process
@@ -615,7 +617,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		break
 	}
 	var sessionID string
-	var options []acp.SessionConfigOption
+	var options *[]acp.SessionConfigOption
 	var modes *acp.SessionModeState
 	var meta map[string]any
 	creating := false
@@ -625,9 +627,11 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		creating = true
 	}
 	if loading {
-		var loaded acp.LoadSessionResponse
-		loaded, err = p.Conn.LoadSession(initCtx, acp.LoadSessionRequest{SessionId: acp.SessionId(t.SessionID), Cwd: t.Cwd, AdditionalDirectories: t.AdditionalDirectories, McpServers: []acp.McpServer{}})
-		options, modes, meta = loaded.ConfigOptions, loaded.Modes, loaded.Meta
+		var loaded *acp.LoadSessionResponse
+		loaded, err = p.Conn.SessionLoad(initCtx, &acp.LoadSessionRequest{SessionID: acp.SessionId(t.SessionID), Cwd: t.Cwd, AdditionalDirectories: t.AdditionalDirectories, McpServers: []acp.McpServer{}})
+		if err == nil {
+			options, modes, meta = loaded.ConfigOptions, loaded.Modes, loaded.Meta
+		}
 		sessionID = t.SessionID
 		if err != nil {
 			err = fmt.Errorf("cannot load session %s: %w. Retry or remove it from Mu; no replacement session was created", t.SessionID, err)
@@ -637,15 +641,17 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		a.mu.Lock()
 		c.creating++
 		a.mu.Unlock()
-		var session acp.NewSessionResponse
 		// A Stop does not abandon session/new either: the agent may create
 		// the session anyway, and only the response says which. The thread
 		// keeps it, and run does not send the stopped prompt.
-		session, err = awaitCreation(a, c, a.loadTimeout, func(ctx context.Context) (acp.NewSessionResponse, error) {
-			return p.Conn.NewSession(ctx, acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
-		}, func(s acp.NewSessionResponse) acp.SessionId { return s.SessionId })
-		sessionID = string(session.SessionId)
-		options, modes, meta = session.ConfigOptions, session.Modes, session.Meta
+		var session *acp.NewSessionResponse
+		session, err = awaitCreation(a, c, a.loadTimeout, func(ctx context.Context) (*acp.NewSessionResponse, error) {
+			return p.Conn.SessionNew(ctx, &acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
+		}, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID })
+		if err == nil {
+			sessionID = string(session.SessionID)
+			options, modes, meta = session.ConfigOptions, session.Modes, session.Meta
+		}
 	}
 	acknowledged := err == nil && sessionID != ""
 	// The SDK delivers notifications sent before a response first. Mark that
@@ -692,7 +698,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 			// Replay precedes the response, so state the response supplies wins.
 			replay(r.initialUpdates[:boundary])
 			if options != nil {
-				current.Session.Options = options
+				current.Session.Options = *options
 			}
 			if modes != nil {
 				current.Session.Modes = modes
@@ -762,7 +768,7 @@ func (a *App) Stop(id string) {
 		// can block on an agent that stopped reading, and Bounded then
 		// terminates the process.
 		if err := p.Bounded(deadline, func(ctx context.Context) error {
-			return p.Conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(session)})
+			return p.Conn.SessionCancel(ctx, &acp.CancelNotification{SessionID: acp.SessionId(session)})
 		}); err != nil {
 			j.cancel()
 			return
@@ -801,7 +807,7 @@ func (a *App) permission(ctx context.Context, id string, r *runtime, epoch uint6
 	case <-ctx.Done():
 	case <-p.cancelled:
 	case option := <-p.answer:
-		return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: option}}}, nil
+		return acp.RequestPermissionResponse{Outcome: acp.SelectedRequestPermissionOutcome(option)}, nil
 	}
 	return agent.CancelledPermission(), nil
 }
@@ -827,7 +833,7 @@ func (a *App) Answer(id, permissionID string, option acp.PermissionOptionId) {
 		return
 	}
 	for _, o := range p.Request.Options {
-		if o.OptionId == option {
+		if o.OptionID == option {
 			select {
 			case p.answer <- option:
 			default:

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
 )
@@ -80,31 +80,34 @@ func (a *App) Reload(id string) error {
 // response replaces the option list, including any dependent option changes.
 func (a *App) SetOption(id, configID string, value any) error {
 	return a.changeSession(id, func(s state.Session, session acp.SessionId) (func(context.Context, *agent.Process) (func(*state.Session), error), error) {
-		var request acp.SetSessionConfigOptionRequest
+		var request *acp.SetSessionConfigOptionRequest
 		for _, option := range s.Options {
-			if o := option.Select; o != nil && string(o.Id) == configID {
+			if string(option.ID) != configID {
+				continue
+			}
+			switch option.Type {
+			case acp.SessionConfigOptionTypeSelect:
 				v, ok := value.(string)
 				if !ok {
 					return nil, errors.New("this option requires a selection")
 				}
-				if !validSelect(o, v) {
+				if !validSelect(option, v) {
 					return nil, errors.New("that value is no longer offered by the agent")
 				}
-				request.ValueId = &acp.SetSessionConfigOptionValueId{SessionId: session, ConfigId: o.Id, Value: acp.SessionConfigValueId(v)}
-			}
-			if o := option.Boolean; o != nil && string(o.Id) == configID {
+				request = &acp.SetSessionConfigOptionRequest{SessionID: session, ConfigID: option.ID, Value: acp.SessionConfigValueId(v)}
+			case acp.SessionConfigOptionTypeBoolean:
 				v, ok := value.(bool)
 				if !ok {
 					return nil, errors.New("this option requires a boolean")
 				}
-				request.Boolean = &acp.SetSessionConfigOptionBoolean{SessionId: session, ConfigId: o.Id, Type: "boolean", Value: v}
+				request = &acp.SetSessionConfigOptionRequest{SessionID: session, ConfigID: option.ID, Type: acp.SetSessionConfigOptionRequestTypeBoolean, Value: v}
 			}
 		}
-		if request.ValueId == nil && request.Boolean == nil {
+		if request == nil {
 			return nil, errors.New("session option not found")
 		}
 		return func(ctx context.Context, p *agent.Process) (func(*state.Session), error) {
-			response, err := p.Conn.SetSessionConfigOption(ctx, request)
+			response, err := p.Conn.SessionSetConfigOption(ctx, request)
 			return func(s *state.Session) {
 				s.Options = response.ConfigOptions
 				storeMeta(s, "configuration", response.Meta)
@@ -113,7 +116,7 @@ func (a *App) SetOption(id, configID string, value any) error {
 	})
 }
 
-func validSelect(o *acp.SessionConfigOptionSelect, value string) bool {
+func validSelect(o acp.SessionConfigOption, value string) bool {
 	if o.Options.Ungrouped != nil {
 		for _, v := range *o.Options.Ungrouped {
 			if string(v.Value) == value {
@@ -121,8 +124,8 @@ func validSelect(o *acp.SessionConfigOptionSelect, value string) bool {
 			}
 		}
 	}
-	if o.Options.Grouped != nil {
-		for _, g := range *o.Options.Grouped {
+	if o.Options.Groups != nil {
+		for _, g := range *o.Options.Groups {
 			for _, v := range g.Options {
 				if string(v.Value) == value {
 					return true
@@ -138,18 +141,18 @@ func (a *App) SetMode(id, mode string) error {
 		if len(s.Options) > 0 {
 			return nil, errors.New("use the agent's configuration options instead of legacy modes")
 		}
-		if s.Modes == nil || !slices.ContainsFunc(s.Modes.AvailableModes, func(m acp.SessionMode) bool { return string(m.Id) == mode }) {
+		if s.Modes == nil || !slices.ContainsFunc(s.Modes.AvailableModes, func(m acp.SessionMode) bool { return string(m.ID) == mode }) {
 			return nil, errors.New("session mode not found")
 		}
 		r := a.runtimes[id] // prepare and apply run with the app mutex held
 		updates := r.modeUpdates
 		return func(ctx context.Context, p *agent.Process) (func(*state.Session), error) {
-			_, err := p.Conn.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: session, ModeId: acp.SessionModeId(mode)})
+			_, err := p.Conn.SessionSetMode(ctx, &acp.SetSessionModeRequest{SessionID: session, ModeID: acp.SessionModeId(mode)})
 			return func(s *state.Session) {
 				// A current_mode_update received meanwhile is the agent's own
 				// account of the mode, and wins.
 				if s.Modes != nil && r.modeUpdates == updates {
-					s.Modes.CurrentModeId = acp.SessionModeId(mode)
+					s.Modes.CurrentModeID = acp.SessionModeId(mode)
 				}
 			}, err
 		}, nil

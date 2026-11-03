@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
 )
@@ -341,7 +341,7 @@ func (a *App) stopIdleLocked() {
 func (a *App) route(c *connection, n acp.SessionNotification) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	id := string(n.SessionId)
+	id := string(n.SessionID)
 	rt, ok := c.routes[id]
 	if !ok {
 		if c.creating > 0 {
@@ -354,7 +354,7 @@ func (a *App) route(c *connection, n acp.SessionNotification) {
 
 func (a *App) routePermission(ctx context.Context, c *connection, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	a.mu.Lock()
-	rt, ok := c.routes[string(req.SessionId)]
+	rt, ok := c.routes[string(req.SessionID)]
 	a.mu.Unlock()
 	if !ok {
 		return agent.CancelledPermission(), nil

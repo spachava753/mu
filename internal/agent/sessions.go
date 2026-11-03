@@ -7,22 +7,30 @@ import (
 	"strings"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
+	"github.com/spachava753/acp-sdk/jsonrpc"
 )
 
 // RequireSessions defines Mu's minimum agent contract, not optional fallbacks.
-func RequireSessions(c acp.AgentCapabilities) error {
+func RequireSessions(c *acp.AgentCapabilities) error {
+	if c == nil {
+		c = &acp.AgentCapabilities{}
+	}
+	s := c.SessionCapabilities
+	if s == nil {
+		s = &acp.SessionCapabilities{}
+	}
 	var missing []string
 	if !c.LoadSession {
 		missing = append(missing, "session/load")
 	}
-	if c.SessionCapabilities.List == nil {
+	if s.List == nil {
 		missing = append(missing, "session/list")
 	}
-	if c.SessionCapabilities.Close == nil {
+	if s.Close == nil {
 		missing = append(missing, "session/close")
 	}
-	if c.SessionCapabilities.Fork == nil {
+	if s.Fork == nil {
 		missing = append(missing, "session/fork")
 	}
 	if len(missing) != 0 {
@@ -57,12 +65,12 @@ func (p *Process) CloseSession(session string, timeout time.Duration) error {
 		return nil
 	}
 	err := p.Bounded(timeout, func(ctx context.Context) error {
-		_, err := p.Conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(session)})
+		_, err := p.Conn.SessionClose(ctx, &acp.CloseSessionRequest{SessionID: acp.SessionId(session)})
 		return err
 	})
 	// Closing is idempotent: -32002 means the agent no longer has the session.
-	var request *acp.RequestError
-	if errors.As(err, &request) && request.Code == sessionNotFound {
+	var response *jsonrpc.Error
+	if errors.As(err, &response) && response.Code == sessionNotFound {
 		return nil
 	}
 	if err != nil {
@@ -73,3 +81,10 @@ func (p *Process) CloseSession(session string, timeout time.Duration) error {
 
 // sessionNotFound is ACP's "resource not found" error code.
 const sessionNotFound = -32002
+
+// AdditionalDirectories reports whether the agent accepts additional
+// workspace directories for its sessions.
+func (p *Process) AdditionalDirectories() bool {
+	c := p.Info.AgentCapabilities
+	return c != nil && c.SessionCapabilities != nil && c.SessionCapabilities.AdditionalDirectories != nil
+}

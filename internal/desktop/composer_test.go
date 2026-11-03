@@ -53,7 +53,7 @@ func TestLongModelOptionsScroll(t *testing.T) {
 			screenshot(t, tt, fmt.Sprintf("scrollable-models-%d", size[0]))
 			click(t, tt, "Model 99")
 			waitView(t, a, tt, func(s app.Snapshot) bool {
-				return !s.Threads[0].Configuring && s.Threads[0].Session.Options[0].Select.CurrentValue == "model-99"
+				return !s.Threads[0].Configuring && s.Threads[0].Session.Options[0].CurrentValue == "model-99"
 			})
 			click(t, tt, "Set Model")
 			tt.Key(0, ui.KeyHome)
@@ -66,7 +66,7 @@ func TestLongModelOptionsScroll(t *testing.T) {
 			tt.Key(0, ui.KeyEnter)
 			tt.Frame()
 			waitView(t, a, tt, func(s app.Snapshot) bool {
-				return !s.Threads[0].Configuring && s.Threads[0].Session.Options[0].Select.CurrentValue == "fast"
+				return !s.Threads[0].Configuring && s.Threads[0].Session.Options[0].CurrentValue == "fast"
 			})
 			click(t, tt, "Close options")
 			usage, ok := tt.Find("Context usage")

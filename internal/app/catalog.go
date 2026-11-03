@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
 )
 
@@ -139,26 +139,26 @@ func (a *App) listSessions(ctx context.Context, config state.AgentConfig) ([]Dis
 	seenCursors, seenSessions := map[string]bool{}, map[string]bool{}
 	var result []DiscoveredSession
 	for page := 0; page < 1000; page++ {
-		var response acp.ListSessionsResponse
+		var response *acp.ListSessionsResponse
 		deadline, _ := ctx.Deadline()
 		err := p.Bounded(time.Until(deadline)+listWatchdog, func(bounded context.Context) error {
 			bounded, cancel := context.WithCancel(bounded)
 			defer cancel()
 			defer context.AfterFunc(ctx, cancel)()
 			var err error
-			response, err = p.Conn.ListSessions(bounded, acp.ListSessionsRequest{Cursor: cursor})
+			response, err = p.Conn.SessionList(bounded, &acp.ListSessionsRequest{Cursor: cursor})
 			return err
 		})
 		if err != nil {
 			return nil, fmt.Errorf("list sessions: %w", p.Error(err))
 		}
 		for _, s := range response.Sessions {
-			id := string(s.SessionId)
+			id := string(s.SessionID)
 			if id == "" || !filepath.IsAbs(s.Cwd) {
 				return nil, errors.New("agent returned invalid session metadata")
 			}
 			for _, root := range s.AdditionalDirectories {
-				if !filepath.IsAbs(root) || p.Info.AgentCapabilities.SessionCapabilities.AdditionalDirectories == nil {
+				if !filepath.IsAbs(root) || !p.AdditionalDirectories() {
 					return nil, errors.New("agent returned unsupported additional workspace directories")
 				}
 			}

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
 )
@@ -65,7 +65,7 @@ func TestProtocolStopBlockedPipe(t *testing.T) {
 		stack := make([]byte, 2*1024*1024)
 		n := goruntime.Stack(stack, true)
 		s := string(stack[:n])
-		if strings.Contains(s, "internal/poll.(*FD).Write") && strings.Contains(s, "capabilityWriter.Write") {
+		if strings.Contains(s, "internal/poll.(*FD).Write") && strings.Contains(s, "(*ioConn).Write") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -99,9 +99,7 @@ func TestProtocolMessageIDs(t *testing.T) {
 	a, id, r := protocolRuntime(t)
 	for _, part := range []struct{ id, text string }{{"msg1", "First."}, {"msg2", "Second."}} {
 		messageID := part.id
-		a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{
-			AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{MessageId: &messageID, Content: acp.TextBlock(part.text)},
-		}})
+		a.update(id, r, acp.SessionNotification{SessionID: "s", Update: withMessageID(acp.AgentMessageChunkSessionUpdate(acp.TextContentBlock(part.text)), messageID)})
 	}
 	got := findThread(t, a, id).Entries
 	if len(got) != 2 {
@@ -111,12 +109,8 @@ func TestProtocolMessageIDs(t *testing.T) {
 
 func TestProtocolToolRawOutputPatch(t *testing.T) {
 	a, id, r := protocolRuntime(t)
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{
-		ToolCallId: "tool", Title: "Read", Content: []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("Keep this content"))},
-	}}})
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
-		ToolCallId: "tool", RawOutput: map[string]any{"done": true},
-	}}})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: toolCallUpdate("tool", "Read", acp.ContentToolCallContent(acp.TextContentBlock("Keep this content")))})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: toolPatchUpdate("tool", func(u *acp.SessionUpdate) { u.RawOutput = map[string]any{"done": true} })})
 	if got := lastText(findThread(t, a, id)); got != "Keep this content\n" {
 		t.Fatalf("rawOutput-only patch replaced content: %q", got)
 	}
@@ -124,12 +118,10 @@ func TestProtocolToolRawOutputPatch(t *testing.T) {
 
 func TestProtocolToolContentReplacement(t *testing.T) {
 	a, id, r := protocolRuntime(t)
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{
-		ToolCallId: "tool", Title: "Run", Content: []acp.ToolCallContent{acp.ToolTerminalRef("term")},
-	}}})
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{
-		ToolCallId: "tool", Content: []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("Replacement summary"))},
-	}}})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: toolCallUpdate("tool", "Run", acp.TerminalToolCallContent("term"))})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: toolPatchUpdate("tool", func(u *acp.SessionUpdate) {
+		u.Content = &[]acp.ToolCallContent{acp.ContentToolCallContent(acp.TextContentBlock("Replacement summary"))}
+	})})
 	if got := lastText(findThread(t, a, id)); got != "Replacement summary\n" {
 		t.Fatalf("content update did not replace the terminal reference: %q", got)
 	}
@@ -147,7 +139,7 @@ func TestProtocolSetupResponseWinsReplayConfig(t *testing.T) {
 	v := connected(t, a, id)
 	// A fresh fixture process sends historical deep during load, then returns
 	// current configOptions with model=fast in the load response.
-	if got := v.Session.Options[0].Select.CurrentValue; got != "fast" {
+	if got := v.Session.Options[0].CurrentValue; got != "fast" {
 		t.Fatalf("pre-response replay overwrote current load response: model=%s", got)
 	}
 }
@@ -162,9 +154,7 @@ func TestProtocolEchoUsesMessageIdentity(t *testing.T) {
 	a.mu.Unlock()
 	t.Cleanup(func() { a.mu.Lock(); r.job = nil; a.mu.Unlock() })
 	chunk := func(messageID, text string) {
-		a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{
-			UserMessageChunk: &acp.SessionUpdateUserMessageChunk{MessageId: &messageID, Content: acp.TextBlock(text)},
-		}})
+		a.update(id, r, acp.SessionNotification{SessionID: "s", Update: withMessageID(acp.UserMessageChunkSessionUpdate(acp.TextContentBlock(text)), messageID)})
 	}
 	chunk("u1", "hel")
 	chunk("u1", "lo")
@@ -181,4 +171,27 @@ func TestProtocolEchoUsesMessageIdentity(t *testing.T) {
 	if got := findThread(t, a, id).Entries; got[0].Text != "hello (expanded)" {
 		t.Fatalf("agent revision of the prompt was not applied: %+v", got)
 	}
+}
+
+// Test constructors for the SDK's flattened session update unions.
+
+func toolCallUpdate(id, title string, content ...acp.ToolCallContent) acp.SessionUpdate {
+	u := acp.ToolCallSessionUpdate(acp.ToolCallId(id), title)
+	if content != nil {
+		u.Content = content
+	}
+	return u
+}
+
+// toolPatchUpdate is a tool_call_update; set gives it the fields it supplies.
+func toolPatchUpdate(id string, set func(*acp.SessionUpdate)) acp.SessionUpdate {
+	u := acp.ToolCallUpdateSessionUpdate(acp.ToolCallId(id))
+	set(&u)
+	return u
+}
+
+func withMessageID(u acp.SessionUpdate, id string) acp.SessionUpdate {
+	m := acp.MessageId(id)
+	u.MessageID = &m
+	return u
 }

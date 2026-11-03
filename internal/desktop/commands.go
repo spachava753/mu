@@ -4,8 +4,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/egoist/mygo/ui"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/app"
 )
 
@@ -126,8 +126,8 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 						ui.Text(c, "/"+command.Name).FontSize(12.5).FontWeight(500).Font("monospace").SingleLine().Shrink(0)
 						ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
 							ui.Text(c, command.Description).FontSize(12).TextColor(c.Theme().TextMuted).SingleLine()
-							if command.Input != nil && command.Input.Unstructured != nil {
-								ui.Text(c, command.Input.Unstructured.Hint).FontSize(11).TextColor(c.Theme().TextMuted.Alpha(0.8)).SingleLine()
+							if command.Input != nil && command.Input.Hint != "" {
+								ui.Text(c, command.Input.Hint).FontSize(11).TextColor(c.Theme().TextMuted.Alpha(0.8)).SingleLine()
 							}
 						})
 					})

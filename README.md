@@ -85,7 +85,7 @@ Session updates are processed while idle as well as during prompts. Mu handles u
 
 Agents ask before some tool calls with ACP `session/request_permission`. Mu shows each request as a card, in the order it receives them, until you choose one of the agent's options; the sidebar marks the thread **Needs permission**. A request often names only a tool call the agent already reported, so the card describes that tool call: its title, kind (such as Execute or Edit), locations, and content such as diffs, or else its input, with the full protocol details on request. Fields in the request take precedence. Options that remember a choice ("always") are remembered by the agent, not by Mu; Mu has no automatic approvals.
 
-Requests can arrive outside a prompt turn and are shown the same way. Mu answers a request as cancelled only when you stop its session's turn (as ACP requires), when the agent withdraws it, or when the session is archived, removed, reloaded, or disconnected, or Mu quits.
+Requests can arrive outside a prompt turn and are shown the same way. Mu answers a request as cancelled only when you stop its session's turn (as ACP requires), or when the session is archived, removed, reloaded, or disconnected, or Mu quits. An agent cannot yet withdraw a pending request with `$/cancel_request`: the ACP SDK Mu uses does not support it, so such a card stays until you answer it.
 
 ## Pi compatibility
 
@@ -151,4 +151,4 @@ MU_QA_RENDER_DIR="$PWD/.qa/motion" go test ./internal/desktop -run '^TestRecordM
 - `internal/state`: session references, atomic storage and locking.
 - `GLOSSARY.md`: session ownership and discovery/import terminology.
 
-The protocol implementation uses [coder/acp-go-sdk](https://github.com/coder/acp-go-sdk).
+The protocol implementation uses [spachava753/acp-sdk](https://github.com/spachava753/acp-sdk).

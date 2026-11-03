@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
@@ -96,15 +96,15 @@ func TestDiscoveryImportAndExternalRemoval(t *testing.T) {
 	var external []string
 	additional := []string{t.TempDir()}
 	for i := 0; i < 3; i++ {
-		result, err := p.Conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, AdditionalDirectories: additional, McpServers: []acp.McpServer{}})
+		result, err := p.Conn.SessionNew(ctx, &acp.NewSessionRequest{Cwd: cwd, AdditionalDirectories: additional, McpServers: []acp.McpServer{}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		external = append(external, string(result.SessionId))
-		if _, err := p.Conn.Prompt(ctx, acp.PromptRequest{SessionId: result.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock("external history")}}); err != nil {
+		external = append(external, string(result.SessionID))
+		if _, err := p.Conn.SessionPrompt(ctx, &acp.PromptRequest{SessionID: result.SessionID, Prompt: []acp.ContentBlock{acp.TextContentBlock("external history")}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := p.Conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: result.SessionId}); err != nil {
+		if _, err := p.Conn.SessionClose(ctx, &acp.CloseSessionRequest{SessionID: result.SessionID}); err != nil {
 			t.Fatal(err)
 		}
 	}

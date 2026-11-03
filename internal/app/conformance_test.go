@@ -3,12 +3,13 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
 )
@@ -175,8 +176,8 @@ func TestAgentModeUpdateWinsOverRequest(t *testing.T) {
 	if err := a.SetMode(id, "code"); err != nil {
 		t.Fatal(err)
 	}
-	if v := await(t, a, id, func(v ThreadView) bool { return !v.Configuring }); v.Session.Modes.CurrentModeId != "ask" {
-		t.Fatalf("requested mode overwrote the agent's: %s", v.Session.Modes.CurrentModeId)
+	if v := await(t, a, id, func(v ThreadView) bool { return !v.Configuring }); v.Session.Modes.CurrentModeID != "ask" {
+		t.Fatalf("requested mode overwrote the agent's: %s", v.Session.Modes.CurrentModeID)
 	}
 }
 
@@ -186,7 +187,7 @@ func TestStreamingDoesNotDirtyRegistry(t *testing.T) {
 	a.mu.Lock()
 	a.dirty = false
 	a.mu.Unlock()
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.UpdateAgentMessageText("streamed")})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: acp.AgentMessageChunkSessionUpdate(acp.TextContentBlock("streamed"))})
 	a.mu.Lock()
 	dirty := a.dirty
 	a.mu.Unlock()
@@ -194,7 +195,9 @@ func TestStreamingDoesNotDirtyRegistry(t *testing.T) {
 		t.Fatal("a message chunk marked the registry dirty")
 	}
 	title := "Renamed"
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{Title: &title}}})
+	info := acp.SessionInfoUpdateSessionUpdate()
+	info.Title = &title
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: info})
 	a.mu.Lock()
 	dirty = a.dirty
 	a.mu.Unlock()
@@ -206,9 +209,9 @@ func TestStreamingDoesNotDirtyRegistry(t *testing.T) {
 // Extension metadata is kept by notification and update kind.
 func TestUpdateMetadataIsKept(t *testing.T) {
 	a, id, r := protocolRuntime(t)
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Meta: map[string]any{"trace": 1}, Update: acp.SessionUpdate{
-		AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Content: acp.TextBlock("x"), Meta: map[string]any{"chunk": true}},
-	}})
+	chunk := acp.AgentMessageChunkSessionUpdate(acp.TextContentBlock("x"))
+	chunk.Meta = acp.Meta{"chunk": true}
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Meta: acp.Meta{"trace": 1}, Update: chunk})
 	m := findThread(t, a, id).Session.Metadata
 	if string(m["notification"]) != `{"trace":1}` || string(m["agent_message_chunk"]) != `{"chunk":true}` {
 		t.Fatalf("metadata: %v", m)
@@ -227,15 +230,11 @@ func TestProtocolEchoRequiresPromptPrefix(t *testing.T) {
 	a.mu.Unlock()
 	t.Cleanup(func() { a.mu.Lock(); r.job = nil; a.mu.Unlock() })
 	chunk := func(messageID, text string) {
-		a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{
-			UserMessageChunk: &acp.SessionUpdateUserMessageChunk{MessageId: &messageID, Content: acp.TextBlock(text)},
-		}})
+		a.update(id, r, acp.SessionNotification{SessionID: "s", Update: withMessageID(acp.UserMessageChunkSessionUpdate(acp.TextContentBlock(text)), messageID)})
 	}
 	// A message whose first chunk is not text is not the echo either.
 	link := "file:///rules.md"
-	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{
-		UserMessageChunk: &acp.SessionUpdateUserMessageChunk{MessageId: &link, Content: acp.ResourceLinkBlock("rules", link)},
-	}})
+	a.update(id, r, acp.SessionNotification{SessionID: "s", Update: withMessageID(acp.UserMessageChunkSessionUpdate(acp.ResourceLinkContentBlock("rules", link)), link)})
 	chunk(link, "h")
 	// A later chunk of the rejected message ("h") must not be taken as the echo.
 	chunk("ctx", "Context: ")
@@ -528,11 +527,13 @@ func TestShutdownJoinsBlockedCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked := func(context.Context) (acp.NewSessionResponse, error) {
-		<-c.process.Conn.Done() // Ignores cancellation until the process ends.
-		return acp.NewSessionResponse{}, errors.New("connection closed")
+	blocked := func(context.Context) (*acp.NewSessionResponse, error) {
+		for c.process.Alive() { // Ignores cancellation until the process ends.
+			time.Sleep(time.Millisecond)
+		}
+		return nil, errors.New("connection closed")
 	}
-	if _, err := awaitCreation(a, c, 50*time.Millisecond, blocked, func(s acp.NewSessionResponse) acp.SessionId { return s.SessionId }); err == nil {
+	if _, err := awaitCreation(a, c, 50*time.Millisecond, blocked, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID }); err == nil {
 		t.Fatal("blocked creation did not time out")
 	}
 	a.release(c) // Only the request's own reference remains.
@@ -663,11 +664,11 @@ func TestLateCleanupKeepsExistingClose(t *testing.T) {
 	a.closingSessions[identity] = existing
 	a.mu.Unlock()
 	before := len(fixtureCalls(t, command))
-	late := func(context.Context) (acp.NewSessionResponse, error) {
+	late := func(context.Context) (*acp.NewSessionResponse, error) {
 		time.Sleep(100 * time.Millisecond)
-		return acp.NewSessionResponse{SessionId: "late"}, nil
+		return &acp.NewSessionResponse{SessionID: "late"}, nil
 	}
-	if _, err := awaitCreation(a, c, 10*time.Millisecond, late, func(s acp.NewSessionResponse) acp.SessionId { return s.SessionId }); err == nil {
+	if _, err := awaitCreation(a, c, 10*time.Millisecond, late, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID }); err == nil {
 		t.Fatal("creation did not time out")
 	}
 	a.release(c)
@@ -758,5 +759,31 @@ func TestReplacementAttemptStopsAtLoadDeadline(t *testing.T) {
 	v := await(t, a, id, func(v ThreadView) bool { return !v.Configuring })
 	if elapsed := time.Since(started); v.Connected || v.SessionError == "" || elapsed > 950*time.Millisecond {
 		t.Fatalf("replacement outlived the load deadline (%s): %+v", elapsed, v)
+	}
+}
+
+// Streamed updates are applied in order, all before the prompt's response.
+func TestStreamedUpdatesStayInOrder(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, testutil.Agent(t))
+	var want strings.Builder
+	for i := range 2000 {
+		fmt.Fprintf(&want, "%d,", i)
+	}
+	if got := lastText(sendDone(t, a, id, "stream")); got != want.String() {
+		t.Fatalf("streamed text out of order or incomplete at the response: %.80q…", got)
+	}
+}
+
+// Mu answers the agent's client file system and terminal requests as unknown
+// methods; it advertises neither.
+func TestClientMethodsAreUnknown(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, testutil.Agent(t))
+	v := sendDone(t, a, id, "client-methods")
+	for i := range 3 {
+		if want := fmt.Sprintf("client method %d: -32601", i); !strings.Contains(lastText(v), want) {
+			t.Fatalf("missing %q in %q", want, lastText(v))
+		}
 	}
 }

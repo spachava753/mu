@@ -6,19 +6,20 @@ import (
 	"strconv"
 	"strings"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/egoist/mygo/ui"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/app"
+	"github.com/spachava753/mu/internal/state"
 )
 
-func count(n int) string {
-	s := strconv.Itoa(n)
-	for i := len(s) - 3; i > 0 && s[i-1] != '-'; i -= 3 {
+func count(n uint64) string {
+	s := strconv.FormatUint(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
 		s = s[:i] + "," + s[i:]
 	}
 	return s
 }
-func contextLabel(u *acp.SessionUsageUpdate) string {
+func contextLabel(u *state.Usage) string {
 	if u.Size <= 0 {
 		return "Context " + count(u.Used) + " / unknown limit"
 	}
@@ -82,24 +83,24 @@ func (v *View) sessionDialog(c *ui.Context, s app.Snapshot) {
 				ui.Text(c, v.err).TextColor(th.Danger).FontSize(12)
 			}
 			disabled := !t.Connected || t.Configuring || t.Archived
-			for _, option := range t.Session.Options {
-				if o := option.Select; o != nil {
-					ui.Column(c.Key(string(o.Id))).Children(func() {
+			for _, o := range t.Session.Options {
+				switch o.Type {
+				case acp.SessionConfigOptionTypeSelect:
+					ui.Column(c.Key(string(o.ID))).Children(func() {
 						description := ""
 						if o.Description != nil {
 							description = *o.Description
 						}
 						choices := selectChoices(o)
 						field(c, o.Name, description, func() {
-							selectChoice(c, "Set "+o.Name, string(o.CurrentValue), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(t.ID, string(o.Id), value)) })
+							selectChoice(c, "Set "+o.Name, selectValue(o), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(t.ID, string(o.ID), value)) })
 						})
 					})
-				}
-				if o := option.Boolean; o != nil {
-					ui.Column(c.Key(string(o.Id))).Gap(4).Children(func() {
-						value := o.CurrentValue
+				case acp.SessionConfigOptionTypeBoolean:
+					ui.Column(c.Key(string(o.ID))).Gap(4).Children(func() {
+						value, _ := o.CurrentValue.(bool)
 						if ui.Checkbox(c, &value, o.Name).Disabled(disabled).Changed() {
-							v.fail(v.app.SetOption(t.ID, string(o.Id), value))
+							v.fail(v.app.SetOption(t.ID, string(o.ID), value))
 						}
 						if o.Description != nil {
 							ui.Text(c, *o.Description).FontSize(11.5).TextColor(th.TextMuted)
@@ -109,7 +110,7 @@ func (v *View) sessionDialog(c *ui.Context, s app.Snapshot) {
 			}
 			if len(t.Session.Options) == 0 && t.Session.Modes != nil {
 				field(c, "Mode", "", func() {
-					selectChoice(c, "Set mode", string(t.Session.Modes.CurrentModeId), modeChoices(t.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(t.ID, value)) })
+					selectChoice(c, "Set mode", string(t.Session.Modes.CurrentModeID), modeChoices(t.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(t.ID, value)) })
 				})
 			}
 			if t.Connected && len(t.Session.Options) == 0 && t.Session.Modes == nil {

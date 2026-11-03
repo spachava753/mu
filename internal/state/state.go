@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/gofrs/flock"
+	"github.com/spachava753/acp-sdk/acp"
 )
 
 type Entry struct {
@@ -48,11 +48,18 @@ type Session struct {
 	Options        []acp.SessionConfigOption  `json:"options,omitempty"`
 	Modes          *acp.SessionModeState      `json:"modes,omitempty"`
 	Commands       []acp.AvailableCommand     `json:"commands,omitempty"`
-	Usage          *acp.SessionUsageUpdate    `json:"usage,omitempty"`
+	Usage          *Usage                     `json:"usage,omitempty"`
 	TurnUsage      *acp.Usage                 `json:"turnUsage,omitempty"`
 	StopReason     acp.StopReason             `json:"stopReason,omitempty"`
 	AgentUpdatedAt string                     `json:"agentUpdatedAt,omitempty"`
 	Metadata       map[string]json.RawMessage `json:"metadata,omitempty"`
+}
+
+// Usage is the agent's latest usage_update: context tokens and session cost.
+type Usage struct {
+	Used uint64    `json:"used"`
+	Size uint64    `json:"size"`
+	Cost *acp.Cost `json:"cost,omitempty"`
 }
 
 // Clone isolates nested SDK unions, maps and slices from background updates.

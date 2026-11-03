@@ -100,7 +100,7 @@ func main() {
 					Write bool `json:"writeTextFile"`
 				} `json:"fs"`
 				Terminal bool      `json:"terminal"`
-				Plan     *struct{} `json:"planCapabilities"`
+				Plan     *struct{} `json:"plan"`
 				Session  struct {
 					ConfigOptions struct {
 						Boolean *struct{} `json:"boolean"`
@@ -289,6 +289,17 @@ func main() {
 				time.Sleep(500 * time.Millisecond)
 				logCall(message{Method: "exited"})
 				os.Exit(0)
+			case "stream":
+				// Many chunks in quick succession, then the response.
+				for i := range 2000 {
+					update(session, "agent_message_chunk", fmt.Sprintf("%d,", i))
+				}
+				finish(s, "end_turn")
+			case "client-methods":
+				// Mu advertises no client file system or terminal methods.
+				for i, method := range []string{"fs/read_text_file", "fs/write_text_file", "terminal/create"} {
+					send(map[string]any{"jsonrpc": "2.0", "id": fmt.Sprintf("client:%s:%d", session, i), "method": method, "params": map[string]any{"sessionId": session, "path": "/tmp/x", "content": "x", "command": "true"}})
+				}
 			case "prompt-error":
 				s.recording, s.pending = false, nil
 				send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32603, "message": "provider overloaded"}})
@@ -364,6 +375,22 @@ func main() {
 				if load, s := loading[session], open[session]; load != nil && s != nil {
 					delete(loading, session)
 					reply(load, setup(s))
+				}
+			}
+			if rest, ok := strings.CutPrefix(id, "client:"); ok {
+				session, n, _ := strings.Cut(rest, ":")
+				var failure struct {
+					Error struct {
+						Code int `json:"code"`
+					} `json:"error"`
+				}
+				_ = json.Unmarshal(scanner.Bytes(), &failure)
+				if s := open[session]; s != nil && s.pending != nil {
+					update(session, "agent_message_chunk", fmt.Sprintf("client method %s: %d\n", n, failure.Error.Code))
+					if answered[session]++; answered[session] == 3 {
+						delete(answered, session)
+						finish(s, "end_turn")
+					}
 				}
 			}
 			if rest, ok := strings.CutPrefix(id, "idle:"); ok {

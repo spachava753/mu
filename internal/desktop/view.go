@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/state"
 )
@@ -411,7 +411,7 @@ func commandName(command string) string {
 	return filepath.Base(strings.Trim(fields[0], `"'`))
 }
 
-func itoa(n int) string { return count(n) }
+func itoa(n int) string { return count(uint64(max(n, 0))) }
 
 func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 	t := c.Theme()
@@ -685,22 +685,32 @@ func roundButton(c *ui.Context, label string, icon *ui.SVG, primary, disabled bo
 // toolbar. Boolean options and descriptions stay in the session dialog.
 func (v *View) inlineOptions(c *ui.Context, thread app.ThreadView) {
 	disabled := !thread.Connected || thread.Configuring || thread.Archived
-	for _, option := range thread.Session.Options {
-		o := option.Select
-		if o == nil {
+	for _, o := range thread.Session.Options {
+		if o.Type != acp.SessionConfigOptionTypeSelect {
 			continue
 		}
 		choices := selectChoices(o)
-		ui.Box(c.Key("inline-" + string(o.Id))).Shrink(1).MinWidth(0).Children(func() {
-			chipSelect(c, o.Name, o.Name, string(o.CurrentValue), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.Id), value)) })
+		ui.Box(c.Key("inline-" + string(o.ID))).Shrink(1).MinWidth(0).Children(func() {
+			chipSelect(c, o.Name, o.Name, selectValue(o), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.ID), value)) })
 		})
 	}
 	if len(thread.Session.Options) == 0 && thread.Session.Modes != nil {
-		chipSelect(c.Key("inline-mode"), "Mode", "Mode", string(thread.Session.Modes.CurrentModeId), modeChoices(thread.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(thread.ID, value)) })
+		chipSelect(c.Key("inline-mode"), "Mode", "Mode", string(thread.Session.Modes.CurrentModeID), modeChoices(thread.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(thread.ID, value)) })
 	}
 }
 
-func selectChoices(o *acp.SessionConfigOptionSelect) []choice {
+// selectValue is a select option's current value ID.
+func selectValue(o acp.SessionConfigOption) string {
+	switch v := o.CurrentValue.(type) {
+	case acp.SessionConfigValueId:
+		return string(v)
+	case string:
+		return v
+	}
+	return ""
+}
+
+func selectChoices(o acp.SessionConfigOption) []choice {
 	choices := []choice{}
 	add := func(values []acp.SessionConfigSelectOption, group string) {
 		for _, v := range values {
@@ -714,8 +724,8 @@ func selectChoices(o *acp.SessionConfigOptionSelect) []choice {
 	if o.Options.Ungrouped != nil {
 		add(*o.Options.Ungrouped, "")
 	}
-	if o.Options.Grouped != nil {
-		for _, g := range *o.Options.Grouped {
+	if o.Options.Groups != nil {
+		for _, g := range *o.Options.Groups {
 			add(g.Options, g.Name)
 		}
 	}
@@ -725,7 +735,7 @@ func selectChoices(o *acp.SessionConfigOptionSelect) []choice {
 func modeChoices(modes *acp.SessionModeState) []choice {
 	choices := []choice{}
 	for _, m := range modes.AvailableModes {
-		item := choice{ID: string(m.Id), Name: m.Name}
+		item := choice{ID: string(m.ID), Name: m.Name}
 		if m.Description != nil {
 			item.Description = *m.Description
 		}
@@ -846,11 +856,11 @@ func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 				for _, o := range p.Request.Options {
 					var button ui.Element
 					if strings.HasPrefix(string(o.Kind), "allow") {
-						button = ui.PrimaryButton(c.Key(string(o.OptionId)), o.Name)
+						button = ui.PrimaryButton(c.Key(string(o.OptionID)), o.Name)
 					} else {
-						button = ui.Button(c.Key(string(o.OptionId)), o.Name)
+						button = ui.Button(c.Key(string(o.OptionID)), o.Name)
 					}
-					button.OnClick(func() { v.app.Answer(id, p.ID, o.OptionId) })
+					button.OnClick(func() { v.app.Answer(id, p.ID, o.OptionID) })
 				}
 				if len(p.Request.Options) == 0 {
 					ui.Text(c, "The agent offered no options. Stop the turn to cancel.").FontSize(12).TextColor(t.TextMuted)

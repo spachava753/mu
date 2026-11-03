@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/egoist/mygo/ui"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/desktop"
@@ -30,15 +30,15 @@ func TestSelectiveSessionImportUI(t *testing.T) {
 			var ids []string
 			// More sessions than fit at 800×600, so the list has to scroll.
 			for i := 0; i < 12; i++ {
-				result, err := p.Conn.NewSession(ctx, acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
+				result, err := p.Conn.SessionNew(ctx, &acp.NewSessionRequest{Cwd: cwd, McpServers: []acp.McpServer{}})
 				if err != nil {
 					t.Fatal(err)
 				}
-				ids = append(ids, string(result.SessionId))
-				if _, err := p.Conn.Prompt(ctx, acp.PromptRequest{SessionId: result.SessionId, Prompt: []acp.ContentBlock{acp.TextBlock("history from another client")}}); err != nil {
+				ids = append(ids, string(result.SessionID))
+				if _, err := p.Conn.SessionPrompt(ctx, &acp.PromptRequest{SessionID: result.SessionID, Prompt: []acp.ContentBlock{acp.TextContentBlock("history from another client")}}); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := p.Conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: result.SessionId}); err != nil {
+				if _, err := p.Conn.SessionClose(ctx, &acp.CloseSessionRequest{SessionID: result.SessionID}); err != nil {
 					t.Fatal(err)
 				}
 			}

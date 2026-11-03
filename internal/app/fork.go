@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
+	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
 )
 
@@ -72,25 +72,25 @@ func (a *App) Fork(id string) (string, error) {
 	if !live {
 		return fail(errors.New("the source session is no longer connected"))
 	}
-	result, err := awaitCreation(a, c, timeout, func(ctx context.Context) (acp.UnstableForkSessionResponse, error) {
-		return p.Conn.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.UnstableMcpServer{}})
-	}, func(fork acp.UnstableForkSessionResponse) acp.SessionId {
-		if string(fork.SessionId) == config.SessionID {
+	result, err := awaitCreation(a, c, timeout, func(ctx context.Context) (*acp.ForkSessionResponse, error) {
+		return p.Conn.SessionFork(ctx, &acp.ForkSessionRequest{SessionID: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.McpServer{}})
+	}, func(fork *acp.ForkSessionResponse) acp.SessionId {
+		if string(fork.SessionID) == config.SessionID {
 			return "" // Never close the source.
 		}
-		return fork.SessionId
+		return fork.SessionID
 	})
 	if err != nil {
 		return fail(fmt.Errorf("fork session: %w", p.Error(err)))
 	}
-	if result.SessionId == "" || string(result.SessionId) == config.SessionID {
+	if result.SessionID == "" || string(result.SessionID) == config.SessionID {
 		return fail(errors.New("agent returned an invalid fork session ID"))
 	}
 	// The fork belongs to the agent; record it even if releasing it fails.
-	closeErr := p.CloseSession(string(result.SessionId), deadline)
+	closeErr := p.CloseSession(string(result.SessionID), deadline)
 
 	fork := config
-	fork.ID, fork.ParentID, fork.SessionID = state.ID(), id, string(result.SessionId)
+	fork.ID, fork.ParentID, fork.SessionID = state.ID(), id, string(result.SessionID)
 	fork.Title, fork.Archived = "Fork: "+config.Title, false
 	fork.Created, fork.Updated = time.Now(), time.Now()
 	a.mu.Lock()
@@ -101,7 +101,7 @@ func (a *App) Fork(id string) (string, error) {
 	a.data.Threads = append(a.data.Threads, fork)
 	if err := a.saveLocked(); err != nil {
 		a.data.Threads = a.data.Threads[:len(a.data.Threads)-1]
-		return fail(fmt.Errorf("fork created as %s but reference was not saved: %w; use Import sessions", result.SessionId, err))
+		return fail(fmt.Errorf("fork created as %s but reference was not saved: %w; use Import sessions", result.SessionID, err))
 	}
 	if closeErr != nil {
 		return fork.ID, fmt.Errorf("fork created, but releasing it from the source connection failed: %w", p.Error(closeErr))

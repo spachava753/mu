@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,8 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/google/shlex"
+	"github.com/spachava753/acp-sdk/acp"
 )
 
 type Hooks struct {
@@ -24,15 +23,18 @@ type Hooks struct {
 }
 
 type Process struct {
-	Conn   *acp.ClientSideConnection
+	Conn   *acp.Client
 	Info   acp.InitializeResponse
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr *tailBuffer
-	sdkLog *tailBuffer // SDK diagnostics, such as undecodable notifications
+	diag   *tailBuffer // protocol diagnostics, such as undecodable notifications
 	done   chan struct{}
 	closed chan struct{}
+	ended  chan struct{} // closed once the agent's output ends
+	endOne sync.Once
+	cancel context.CancelFunc // ends requests the agent sent
 	once   sync.Once
 	lifeMu sync.Mutex
 	hooks  Hooks
@@ -58,7 +60,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	cmd.Dir = cwd
 	prepareProcess(cmd)
 	cmd.WaitDelay = time.Second
-	p := &Process{cmd: cmd, hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, sdkLog: &tailBuffer{limit: 4096}}
+	p := &Process{cmd: cmd, hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), ended: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, diag: &tailBuffer{limit: 4096}}
 	cmd.Stderr = p.stderr
 	p.stdin, err = cmd.StdinPipe()
 	if err != nil {
@@ -79,8 +81,18 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 	_ = writer.Close()
-	p.Conn = acp.NewClientSideConnection(p, capabilityWriter{p.stdin}, p.stdout)
-	p.Conn.SetLogger(slog.New(slog.NewTextHandler(p.sdkLog, &slog.HandlerOptions{Level: slog.LevelError})))
+	// Requests the agent sends live as long as the process, not this startup.
+	lifetime, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.Conn, err = acp.Connect(lifetime, transport{p}, handler{p})
+	if err != nil {
+		cancel()
+		_ = p.stdin.Close()
+		_ = p.stdout.Close()
+		killProcess(cmd)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("connect agent: %w", err)
+	}
 	go func() {
 		_ = cmd.Wait()
 		p.lifeMu.Lock()
@@ -89,13 +101,17 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 		p.lifeMu.Unlock()
 	}()
 	// Mu does not offer client file system or terminal methods: agents use
-	// their own. ACP v2 removes both from the protocol.
-	info, err := p.Conn.Initialize(ctx, acp.InitializeRequest{
-		ProtocolVersion:    acp.ProtocolVersionNumber,
-		ClientInfo:         &acp.Implementation{Name: "mu", Version: "0.1.0"},
-		ClientCapabilities: acp.ClientCapabilities{PlanCapabilities: &acp.PlanCapabilities{}},
+	// their own. ACP v2 removes both from the protocol. It renders plan
+	// updates and boolean session options.
+	info, err := p.Conn.Initialize(ctx, &acp.InitializeRequest{
+		ProtocolVersion: ProtocolVersion,
+		ClientInfo:      &acp.Implementation{Name: "mu", Version: "0.1.0"},
+		ClientCapabilities: &acp.ClientCapabilities{
+			Plan:    &acp.PlanCapabilities{},
+			Session: &acp.ClientSessionCapabilities{ConfigOptions: &acp.SessionConfigOptionsCapabilities{Boolean: &acp.BooleanConfigOptionCapabilities{}}},
+		},
 	})
-	if err == nil && info.ProtocolVersion != acp.ProtocolVersionNumber {
+	if err == nil && info.ProtocolVersion != ProtocolVersion {
 		err = fmt.Errorf("unsupported ACP version %d", info.ProtocolVersion)
 	}
 	if err == nil {
@@ -105,15 +121,18 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 		p.Close()
 		return nil, p.Error(fmt.Errorf("initialize ACP: %w", err))
 	}
-	p.Info = info
+	p.Info = *info
 	return p, nil
 }
+
+// ProtocolVersion is the ACP version Mu speaks.
+const ProtocolVersion acp.ProtocolVersion = 1
 
 func (p *Process) Alive() bool {
 	select {
 	case <-p.closed:
 		return false
-	case <-p.Conn.Done():
+	case <-p.ended:
 		return false
 	default:
 		return true
@@ -127,7 +146,7 @@ func (p *Process) Error(err error) error {
 	if output := p.stderr.snapshot(); strings.TrimSpace(output) != "" {
 		err = fmt.Errorf("%w\nAgent stderr:\n%s", err, output)
 	}
-	if output := p.sdkLog.snapshot(); strings.TrimSpace(output) != "" {
+	if output := p.diag.snapshot(); strings.TrimSpace(output) != "" {
 		err = fmt.Errorf("%w\nACP diagnostics:\n%s", err, output)
 	}
 	return err
@@ -175,6 +194,7 @@ func (p *Process) shutdown(graceful bool) {
 		}
 		signal(killProcess)
 		_ = p.stdout.Close()
+		p.cancel()
 		select {
 		case <-p.done:
 		case <-time.After(2 * time.Second):
@@ -182,31 +202,39 @@ func (p *Process) shutdown(graceful bool) {
 	})
 }
 
-func (p *Process) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
-	if p.hooks.Update != nil {
-		p.hooks.Update(n)
-	}
-	return nil
-}
-
 func CancelledPermission() acp.RequestPermissionResponse {
-	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}
+	return acp.RequestPermissionResponse{Outcome: acp.CancelledRequestPermissionOutcome()}
 }
 
-func (p *Process) RequestPermission(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+// handler serves the requests an agent sends to Mu. The SDK answers methods
+// it does not implement, such as the client file system and terminal
+// methods, with method-not-found. Session updates are delivered in order by
+// the transport instead.
+type handler struct{ p *Process }
+
+var _ acp.SessionRequestPermissionHandler = handler{}
+
+func (h handler) SessionRequestPermission(ctx context.Context, req *acp.RequestPermissionRequest) (*acp.RequestPermissionResponse, error) {
+	p := h.p
 	if p.hooks.Permission == nil {
-		return CancelledPermission(), nil
+		response := CancelledPermission()
+		return &response, nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
 		select {
 		case <-p.closed:
-			cancel()
+		case <-p.ended:
 		case <-ctx.Done():
 		}
+		cancel()
 	}()
-	return p.hooks.Permission(ctx, req)
+	response, err := p.hooks.Permission(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 // tailBuffer retains the end of the agent's stderr for error reports.

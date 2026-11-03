@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	acp "github.com/coder/acp-go-sdk"
 	"github.com/spachava753/mu/internal/testutil"
 )
 
@@ -51,16 +49,7 @@ func TestProcessLifecycle(t *testing.T) {
 		t.Fatal("not initialized")
 	}
 	// The test agent rejects initialization that advertises client file
-	// system or terminal methods; requests for them are unknown methods.
-	_, readErr := p.ReadTextFile(ctx, acp.ReadTextFileRequest{SessionId: "s", Path: "/etc/hostname"})
-	_, writeErr := p.WriteTextFile(ctx, acp.WriteTextFileRequest{SessionId: "s", Path: "/tmp/x", Content: "x"})
-	_, terminalErr := p.CreateTerminal(ctx, acp.CreateTerminalRequest{SessionId: "s", Command: "true"})
-	for _, err := range []error{readErr, writeErr, terminalErr} {
-		var request *acp.RequestError
-		if !errors.As(err, &request) || request.Code != acp.NewMethodNotFound("").Code {
-			t.Fatal("client method was not rejected as unknown:", err)
-		}
-	}
+	// system or terminal methods (TestClientMethodsAreUnknown covers requests).
 	p.Close()
 	if p.Alive() {
 		t.Fatal("process still alive")
