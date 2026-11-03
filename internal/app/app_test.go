@@ -276,7 +276,7 @@ func TestAtomicFailureDoesNotCreatePhantomThread(t *testing.T) {
 	}
 }
 
-func TestUpdateReductionAndTerminalExtensions(t *testing.T) {
+func TestUpdateReductionAndToolExtensions(t *testing.T) {
 	a := openTest(t, t.TempDir())
 	id := createTest(t, a, "agent")
 	a.mu.Lock()
@@ -291,18 +291,14 @@ func TestUpdateReductionAndTerminalExtensions(t *testing.T) {
 		t.Fatal(got)
 	}
 	a.update(id, r, acp.SessionNotification{SessionId: "wrong", Update: acp.UpdateAgentMessageText("ignore")})
-	a.terminalOutput(id, r, 0, "s", "term", "early output")
+	// Mu runs no terminals: a terminal reference is shown as a placeholder.
 	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{ToolCallId: "tool", Title: "Run", Content: []acp.ToolCallContent{acp.ToolTerminalRef("term")}}}})
-	if lastText(findThread(t, a, id)) != "early output" {
-		t.Fatal("lost output before tool notification")
-	}
-	a.terminalOutput(id, r, 0, "s", "term", "completed output")
-	if lastText(findThread(t, a, id)) != "completed output" {
-		t.Fatal("terminal did not update")
+	if got := lastText(findThread(t, a, id)); got != "Terminal: term\n" {
+		t.Fatalf("terminal reference: %q", got)
 	}
 	// Extension metadata is retained for inspection but is not a terminal transport.
 	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCallUpdate: &acp.SessionToolCallUpdate{ToolCallId: "tool", Meta: map[string]any{"terminal_output": map[string]any{"terminal_id": "term", "data": " delta"}}}}})
-	if v := findThread(t, a, id); lastText(v) != "completed output" || !strings.Contains(v.Entries[len(v.Entries)-1].Details, "terminal_output") {
+	if v := findThread(t, a, id); lastText(v) != "Terminal: term\n" || !strings.Contains(v.Entries[len(v.Entries)-1].Details, "terminal_output") {
 		t.Fatal("metadata changed terminal output or was dropped", v.Entries)
 	}
 }

@@ -21,7 +21,7 @@ A named, existing folder that all of its threads work in. Removing a project lea
 _Avoid_: Workspace, repository
 
 **Agent connection**:
-One running agent process that serves the sessions of every thread using the same agent configuration.
+One running agent process that serves the sessions of every thread using the same agent configuration, and its discovery. A saved agent's connection stays open while idle.
 _Avoid_: Thread process
 
 **Discovery**:

@@ -2,7 +2,6 @@
 package desktop
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"strings"
 
@@ -601,8 +600,15 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 		if thread.Notice != "" {
 			ui.Text(c, thread.Notice).Padding(0, 24, 8, 24).FontSize(12).TextColor(t.TextMuted).AlignSelf(ui.Center)
 		}
-		for _, p := range thread.Permissions {
-			v.permission(c, thread.ID, p)
+		if len(thread.Permissions) > 0 {
+			// Several requests, or a large one, scroll instead of pushing the
+			// composer and Stop out of the window.
+			_, height := c.Size()
+			ui.Scroll(c).Shrink(0).MaxHeight(height * 0.5).Children(func() {
+				for _, p := range thread.Permissions {
+					v.permission(c, thread.ID, p)
+				}
+			})
 		}
 		if thread.Error != "" {
 			v.errorBox(c, thread.Error)
@@ -821,17 +827,19 @@ func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 	ui.Row(c.Key(p.ID)).Shrink(0).Justify(ui.Center).Padding(0, 24, 8, 24).Children(func() {
 		ui.Column(c).Grow(1).MaxWidth(readingWidth).MinWidth(0).Padding(12, 14).Gap(10).Radius(8).Border(1, hairline(t)).Background(t.Surface).Children(func() {
 			title := "Permission needed"
-			if p.Request.ToolCall.Title != nil {
-				title += " for " + *p.Request.ToolCall.Title
+			if p.Tool.Title != "" {
+				title += " for " + p.Tool.Title
 			}
 			ui.Row(c).Gap(8).Children(func() {
 				ui.Icon(c, warningIcon).Size(15, 15).TextColor(warnColor(t))
 				ui.Text(c, title).FontSize(13).FontWeight(500).Grow(1).MinWidth(0)
+				if kind := toolKindLabel(p.Tool.Kind); kind != "" {
+					ui.Text(c, kind).FontSize(11.5).TextColor(t.TextMuted).Shrink(0)
+				}
 			})
-			if p.Request.ToolCall.RawInput != nil || len(p.Request.ToolCall.Content) > 0 || len(p.Request.ToolCall.Locations) > 0 {
-				b, _ := json.MarshalIndent(p.Request.ToolCall, "", "  ")
+			if p.Tool.Text != "" {
 				ui.Scroll(c).MaxHeight(120).Radius(6).Border(1, t.Border).Background(t.Background).Padding(8, 10).Children(func() {
-					ui.Text(c, string(b)).Selectable().Font("monospace").FontSize(11.5).TextColor(t.TextMuted)
+					ui.Text(c, strings.TrimRight(p.Tool.Text, "\n")).Selectable().Font("monospace").FontSize(11.5).TextColor(t.TextMuted)
 				})
 			}
 			ui.Row(c).Gap(8).Wrap().Children(func() {
@@ -848,8 +856,22 @@ func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 					ui.Text(c, "The agent offered no options. Stop the turn to cancel.").FontSize(12).TextColor(t.TextMuted)
 				}
 			})
+			// Details follow the options, so expanding them never hides the choice.
+			smallDisclosure(c, "Tool / protocol details", v.disclosure("permission"+id+p.ID), func() {
+				ui.Scroll(c).MaxHeight(160).Children(func() { detailText(c, p.Tool.Details) })
+			})
 		})
 	})
+}
+
+// toolKindLabel names an ACP tool kind, such as "Execute" or "Switch mode".
+// The catch-all "other" kind adds nothing and is omitted.
+func toolKindLabel(kind string) string {
+	if kind == "" || kind == string(acp.ToolKindOther) {
+		return ""
+	}
+	label := strings.ReplaceAll(kind, "_", " ")
+	return strings.ToUpper(label[:1]) + label[1:]
 }
 
 func (v *View) errorBox(c *ui.Context, text string, actions ...func()) {

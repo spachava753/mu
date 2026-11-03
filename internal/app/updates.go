@@ -29,7 +29,7 @@ func contentText(b acp.ContentBlock) string {
 	return ""
 }
 
-func toolText(content []acp.ToolCallContent, raw any, outputs map[string]string) string {
+func toolText(content []acp.ToolCallContent, raw any) string {
 	var b strings.Builder
 	for _, c := range content {
 		if c.Content != nil {
@@ -44,11 +44,8 @@ func toolText(content []acp.ToolCallContent, raw any, outputs map[string]string)
 			b.WriteString("After:\n" + c.Diff.NewText + "\n")
 		}
 		if c.Terminal != nil {
-			if output, ok := outputs[c.Terminal.TerminalId]; ok {
-				b.WriteString(output)
-			} else {
-				b.WriteString("Terminal: " + c.Terminal.TerminalId + "\n")
-			}
+			// Mu runs no terminals, so it has no output for this reference.
+			b.WriteString("Terminal: " + c.Terminal.TerminalId + "\n")
 		}
 	}
 	if b.Len() == 0 && raw != nil {
@@ -79,6 +76,10 @@ func (a *App) receiveLocked(id string, r *runtime, epoch uint64, n acp.SessionNo
 	}
 	if r.initializing {
 		r.initialUpdates = append(r.initialUpdates, n)
+		if len(r.pending) > 0 {
+			// A pending permission's card is derived from buffered tool calls.
+			a.notifyLocked()
+		}
 		return
 	}
 	a.updateLocked(id, r, n)
@@ -128,9 +129,9 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 			break
 		}
 		v := u.ToolCall
-		call := &toolCall{Title: v.Title, Kind: v.Kind, Status: v.Status, Content: v.Content, Locations: v.Locations, RawInput: v.RawInput, RawOutput: v.RawOutput, Meta: v.Meta}
+		call := newToolCall(v)
 		r.tools[string(v.ToolCallId)] = call
-		renderTool(t, r, string(v.ToolCallId), call)
+		renderTool(t, string(v.ToolCallId), call)
 	case u.ToolCallUpdate != nil:
 		if !r.acceptUpdates {
 			break
@@ -142,7 +143,7 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 			r.tools[string(v.ToolCallId)] = call
 		}
 		call.patch(v)
-		renderTool(t, r, string(v.ToolCallId), call)
+		renderTool(t, string(v.ToolCallId), call)
 	case u.Plan != nil:
 		setPlan(t, "legacy", planText(u.Plan.Entries), pretty(u.Plan))
 	case u.PlanUpdate != nil:
@@ -295,6 +296,28 @@ type toolCall struct {
 	Meta      map[string]any         `json:"_meta,omitempty"`
 }
 
+func newToolCall(v *acp.SessionUpdateToolCall) *toolCall {
+	return &toolCall{Title: v.Title, Kind: v.Kind, Status: v.Status, Content: v.Content, Locations: v.Locations, RawInput: v.RawInput, RawOutput: v.RawOutput, Meta: v.Meta}
+}
+
+// bufferedTool projects one tool call from setup notifications that are
+// buffered until session/load succeeds, without committing them.
+func bufferedTool(updates []acp.SessionNotification, id string) *toolCall {
+	var call *toolCall
+	for _, n := range updates {
+		switch u := n.Update; {
+		case u.ToolCall != nil && string(u.ToolCall.ToolCallId) == id:
+			call = newToolCall(u.ToolCall)
+		case u.ToolCallUpdate != nil && string(u.ToolCallUpdate.ToolCallId) == id:
+			if call == nil {
+				call = &toolCall{}
+			}
+			call.patch(u.ToolCallUpdate)
+		}
+	}
+	return call
+}
+
 func (c *toolCall) patch(u *acp.SessionToolCallUpdate) {
 	if u.Title != nil {
 		c.Title = *u.Title
@@ -322,13 +345,7 @@ func (c *toolCall) patch(u *acp.SessionToolCallUpdate) {
 	}
 }
 
-func (c *toolCall) terminal(id string) bool {
-	return slices.ContainsFunc(c.Content, func(item acp.ToolCallContent) bool {
-		return item.Terminal != nil && item.Terminal.TerminalId == id
-	})
-}
-
-func renderTool(t *thread, r *runtime, id string, c *toolCall) {
+func renderTool(t *thread, id string, c *toolCall) {
 	var e *state.Entry
 	for i := len(t.Entries) - 1; i >= 0; i-- {
 		if t.Entries[i].Role == "tool" && t.Entries[i].ToolID == id {
@@ -344,7 +361,32 @@ func renderTool(t *thread, r *runtime, id string, c *toolCall) {
 	if e.Title == "" {
 		e.Title = "Tool"
 	}
-	e.Text, e.Details = toolText(c.Content, c.RawOutput, r.outputs), pretty(c)
+	e.Text, e.Details = toolText(c.Content, c.RawOutput), pretty(c)
+}
+
+// permissionTool describes a permission request's tool call: the known
+// projection, if any, patched with the request's fields. Patching replaces
+// fields and never modifies the projection's nested values.
+func permissionTool(known *toolCall, u acp.ToolCallUpdate) PermissionTool {
+	var call toolCall
+	if known != nil {
+		call = *known
+	}
+	call.patch(&acp.SessionToolCallUpdate{Title: u.Title, Kind: u.Kind, Status: u.Status, Content: u.Content, Locations: u.Locations, RawInput: u.RawInput, RawOutput: u.RawOutput, Meta: u.Meta})
+	var b strings.Builder
+	for _, l := range call.Locations {
+		b.WriteString(l.Path)
+		if l.Line != nil {
+			fmt.Fprintf(&b, ":%d", *l.Line)
+		}
+		b.WriteByte('\n')
+	}
+	if text := toolText(call.Content, nil); text != "" {
+		b.WriteString(text)
+	} else if call.RawInput != nil {
+		b.WriteString(pretty(call.RawInput) + "\n")
+	}
+	return PermissionTool{Title: call.Title, Kind: string(call.Kind), Text: b.String(), Details: pretty(call)}
 }
 
 func planText(entries []acp.PlanEntry) string {
@@ -363,22 +405,4 @@ func setPlan(t *thread, id, text, details string) {
 		}
 	}
 	t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: "plan", PlanID: id, Title: "Plan", Text: text, Details: details})
-}
-
-func (a *App) terminalOutput(id string, r *runtime, epoch uint64, session acp.SessionId, terminalID, output string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if !r.acceptUpdates || r.epoch != epoch || r.session != string(session) {
-		return
-	}
-	r.outputs[terminalID] = output
-	if t := a.threadLocked(id); t != nil {
-		for toolID, call := range r.tools {
-			if call.terminal(terminalID) {
-				renderTool(t, r, toolID, call)
-			}
-		}
-	}
-	a.dirty = true
-	a.notifyLocked()
 }

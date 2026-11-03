@@ -3,6 +3,7 @@ package app
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
@@ -63,7 +64,7 @@ func TestThreadsShareAgentConnection(t *testing.T) {
 	if v.Cwd == findThread(t, a, second).Cwd {
 		t.Fatal("threads share a folder")
 	}
-	// The process ends with its last session.
+	// A saved agent's process outlives its sessions, and discovery uses it.
 	if err := a.Delete(first); err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +72,54 @@ func TestThreadsShareAgentConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	await(t, a, second, func(v ThreadView) bool { return !v.Configuring })
+	if n := connectionCount(a); n != 1 {
+		t.Fatalf("saved agent's idle process was not kept: %d connections", n)
+	}
+	if c := discoverDone(t, a, agentID); c.Error != "" || !c.Complete {
+		t.Fatal(c)
+	}
+	if err := a.Archive(second, false); err != nil {
+		t.Fatal(err)
+	}
+	connected(t, a, second)
+	calls = fixtureCalls(t, command)[before:]
+	if count(calls, "initialize") != 1 || count(calls, "session/list") != 1 || count(calls, "session/load") != 1 {
+		t.Fatalf("discovery or reopening started another process: %v", calls)
+	}
+	// Removing the saved agent stops the process once its last session closes.
+	if err := a.RemoveAgent(agentID); err != nil {
+		t.Fatal(err)
+	}
+	if n := connectionCount(a); n != 1 {
+		t.Fatal("process in use was stopped")
+	}
+	if err := a.Archive(second, true); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, second, func(v ThreadView) bool { return !v.Configuring })
 	if n := connectionCount(a); n != 0 {
-		t.Fatalf("%d connections remain after their sessions closed", n)
+		t.Fatalf("%d connections remain for a removed agent", n)
+	}
+}
+
+func TestEditingSavedAgentStopsIdleProcess(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	agentID, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := discoverDone(t, a, agentID); c.Error != "" {
+		t.Fatal(c)
+	}
+	if n := connectionCount(a); n != 1 {
+		t.Fatalf("discovery did not keep the saved agent's process: %d", n)
+	}
+	if _, err := a.SaveAgent(state.AgentConfig{ID: agentID, Name: "Fixture", Command: command + " session-ui"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := connectionCount(a); n != 0 {
+		t.Fatalf("idle process for the old command kept running: %d", n)
 	}
 }
 
@@ -94,5 +141,37 @@ func TestConnectionRestartsAfterAgentExit(t *testing.T) {
 	}
 	if n := connectionCount(a); n != 1 {
 		t.Fatalf("expected one replacement connection, got %d", n)
+	}
+}
+
+// A discovery that times out on a responsive shared process must not
+// terminate it: only a blocked write may.
+func TestDiscoveryTimeoutKeepsSharedProcess(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	a.mu.Lock()
+	a.discoveryTimeout = 300 * time.Millisecond
+	a.mu.Unlock()
+	agentID, err := a.SaveAgent(state.AgentConfig{Name: "Fixture", Command: command + " wait-list"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := a.CreateWithAgent(agentID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected(t, a, id)
+	before := len(fixtureCalls(t, command))
+	if c := discoverDone(t, a, agentID); c.Error == "" || c.Complete {
+		t.Fatalf("unanswered listing did not time out: %+v", c)
+	}
+	if v := findThread(t, a, id); !v.Connected {
+		t.Fatal("discovery timeout disconnected the shared process")
+	}
+	if v := sendDone(t, a, id, "after discovery"); v.Error != "" || lastText(v) != "Echo: after discovery" {
+		t.Fatalf("session unusable after discovery timeout: %+v", v)
+	}
+	if calls := fixtureCalls(t, command)[before:]; count(calls, "initialize") != 0 {
+		t.Fatalf("process restarted: %v", calls)
 	}
 }

@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
-	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
 )
 
@@ -33,9 +31,9 @@ func sameConnection(t state.Thread, c state.AgentConfig) bool {
 	return t.AgentID == c.ID && t.Command == c.Command
 }
 
-// Discover lists all pages on a separate process, started in the general
-// working directory. Listing never creates or loads a session, and an
-// incomplete listing never reconciles the managed references.
+// Discover lists all pages on the agent's shared connection, starting it in
+// the general working directory if needed. Listing never creates or loads a
+// session, and an incomplete listing never reconciles the managed references.
 func (a *App) Discover(agentID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -55,14 +53,10 @@ func (a *App) Discover(agentID string) error {
 	if a.catalogCancel != nil {
 		a.catalogCancel()
 	}
-	launchCwd := a.workingDirectoryLocked()
-	if !filepath.IsAbs(launchCwd) {
+	if !filepath.IsAbs(a.workingDirectoryLocked()) {
 		return errors.New("choose an absolute working directory in Settings")
 	}
-	if err := os.MkdirAll(launchCwd, 0o755); err != nil {
-		return fmt.Errorf("working directory: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), a.discoveryTimeout)
 	a.catalogGeneration++
 	generation := a.catalogGeneration
 	a.catalogCancel = cancel
@@ -72,7 +66,7 @@ func (a *App) Discover(agentID string) error {
 	go func() {
 		defer a.wg.Done()
 		defer cancel()
-		sessions, err := listSessions(ctx, config.Command, launchCwd)
+		sessions, err := a.listSessions(ctx, config)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if a.closed || a.catalog.Generation != generation {
@@ -98,14 +92,14 @@ func (a *App) Discover(agentID string) error {
 			if s, ok := found[t.SessionID]; ok {
 				r.Notice = ""
 				// cwd is immutable in ACP, so a different one means this is not
-				// the session Mu imported. Do not retarget filesystem delegation.
+				// the session Mu imported. Do not retarget the reference.
 				if s.Cwd != t.Cwd {
 					r.Notice = "The agent reports a different working directory for this session. Remove and re-import this reference after checking the agent configuration."
 					continue
 				}
 				// Additional directories are inputs to each load, not identity.
 				// Keep the set accepted at import: listing metadata never
-				// expands which directories the agent may access through Mu.
+				// changes which directories Mu supplies.
 				if !slices.Equal(s.AdditionalDirectories, t.AdditionalDirectories) {
 					r.Notice = "The agent lists different additional directories for this session. Mu still loads it with the directories accepted at import."
 				}
@@ -124,17 +118,37 @@ func (a *App) Discover(agentID string) error {
 	return nil
 }
 
-func listSessions(ctx context.Context, command, cwd string) ([]DiscoveredSession, error) {
-	p, err := agent.Start(ctx, command, cwd, agent.Hooks{})
+// DiscoveryTimeout bounds a discovery, including starting the agent.
+const DiscoveryTimeout = 30 * time.Second
+
+// listWatchdog is how long after a discovery's own deadline a page request may
+// still be outstanding before the shared process is terminated. A slow or
+// unanswered request ends promptly with the discovery's context; only a
+// request whose write is blocked on an agent that stopped reading its input
+// outlives it.
+const listWatchdog = 15 * time.Second
+
+func (a *App) listSessions(ctx context.Context, config state.AgentConfig) ([]DiscoveredSession, error) {
+	c, err := a.acquire(ctx, config.ID, config.Command)
 	if err != nil {
 		return nil, err
 	}
-	defer p.Close()
+	defer a.release(c)
+	p := c.process
 	var cursor *string
 	seenCursors, seenSessions := map[string]bool{}, map[string]bool{}
 	var result []DiscoveredSession
 	for page := 0; page < 1000; page++ {
-		response, err := p.Conn.ListSessions(ctx, acp.ListSessionsRequest{Cursor: cursor})
+		var response acp.ListSessionsResponse
+		deadline, _ := ctx.Deadline()
+		err := p.Bounded(time.Until(deadline)+listWatchdog, func(bounded context.Context) error {
+			bounded, cancel := context.WithCancel(bounded)
+			defer cancel()
+			defer context.AfterFunc(ctx, cancel)()
+			var err error
+			response, err = p.Conn.ListSessions(bounded, acp.ListSessionsRequest{Cursor: cursor})
+			return err
+		})
 		if err != nil {
 			return nil, fmt.Errorf("list sessions: %w", p.Error(err))
 		}

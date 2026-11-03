@@ -122,9 +122,8 @@ func TestProtocolToolRawOutputPatch(t *testing.T) {
 	}
 }
 
-func TestProtocolToolTerminalReplacement(t *testing.T) {
+func TestProtocolToolContentReplacement(t *testing.T) {
 	a, id, r := protocolRuntime(t)
-	a.terminalOutput(id, r, 0, "s", "term", "Old terminal output")
 	a.update(id, r, acp.SessionNotification{SessionId: "s", Update: acp.SessionUpdate{ToolCall: &acp.SessionUpdateToolCall{
 		ToolCallId: "tool", Title: "Run", Content: []acp.ToolCallContent{acp.ToolTerminalRef("term")},
 	}}})
@@ -132,7 +131,7 @@ func TestProtocolToolTerminalReplacement(t *testing.T) {
 		ToolCallId: "tool", Content: []acp.ToolCallContent{acp.ToolContent(acp.TextBlock("Replacement summary"))},
 	}}})
 	if got := lastText(findThread(t, a, id)); got != "Replacement summary\n" {
-		t.Fatalf("replacement content overridden by old terminal binding: %q", got)
+		t.Fatalf("content update did not replace the terminal reference: %q", got)
 	}
 }
 

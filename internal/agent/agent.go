@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,27 +19,22 @@ import (
 )
 
 type Hooks struct {
-	Terminal   func(acp.SessionId, string, string)
 	Update     func(acp.SessionNotification)
 	Permission func(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
 }
 
 type Process struct {
-	Conn      *acp.ClientSideConnection
-	Info      acp.InitializeResponse
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	stderr    *tailBuffer
-	done      chan struct{}
-	closed    chan struct{}
-	once      sync.Once
-	lifeMu    sync.Mutex
-	hooks     Hooks
-	cwd       string
-	mu        sync.Mutex
-	terminals map[string]*terminal
-	roots     map[acp.SessionId][]string
+	Conn   *acp.ClientSideConnection
+	Info   acp.InitializeResponse
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr *tailBuffer
+	done   chan struct{}
+	closed chan struct{}
+	once   sync.Once
+	lifeMu sync.Mutex
+	hooks  Hooks
 }
 
 func ParseCommand(command string) ([]string, error) {
@@ -63,7 +57,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	cmd.Dir = cwd
 	prepareProcess(cmd)
 	cmd.WaitDelay = time.Second
-	p := &Process{cmd: cmd, hooks: hooks, cwd: cwd, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, terminals: map[string]*terminal{}, roots: map[acp.SessionId][]string{}}
+	p := &Process{cmd: cmd, hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}}
 	cmd.Stderr = p.stderr
 	p.stdin, err = cmd.StdinPipe()
 	if err != nil {
@@ -93,10 +87,12 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 		close(p.done)
 		p.lifeMu.Unlock()
 	}()
+	// Mu does not offer client file system or terminal methods: agents use
+	// their own. ACP v2 removes both from the protocol.
 	info, err := p.Conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientInfo:         &acp.Implementation{Name: "mu", Version: "0.1.0"},
-		ClientCapabilities: acp.ClientCapabilities{Fs: acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true}, Terminal: true, PlanCapabilities: &acp.PlanCapabilities{}},
+		ClientCapabilities: acp.ClientCapabilities{PlanCapabilities: &acp.PlanCapabilities{}},
 	})
 	if err == nil && info.ProtocolVersion != acp.ProtocolVersionNumber {
 		err = fmt.Errorf("unsupported ACP version %d", info.ProtocolVersion)
@@ -127,7 +123,7 @@ func (p *Process) Error(err error) error {
 	if err == nil {
 		return nil
 	}
-	output, _ := p.stderr.snapshot()
+	output := p.stderr.snapshot()
 	if strings.TrimSpace(output) != "" {
 		return fmt.Errorf("%w\nAgent stderr:\n%s", err, output)
 	}
@@ -137,13 +133,6 @@ func (p *Process) Error(err error) error {
 func (p *Process) Close() {
 	p.once.Do(func() {
 		close(p.closed)
-		p.mu.Lock()
-		var terminals []*terminal
-		for _, t := range p.terminals {
-			t.kill()
-			terminals = append(terminals, t)
-		}
-		p.mu.Unlock()
 		_ = p.stdin.Close()
 		p.lifeMu.Lock()
 		select {
@@ -153,19 +142,9 @@ func (p *Process) Close() {
 		}
 		p.lifeMu.Unlock()
 		_ = p.stdout.Close()
-		deadline := time.NewTimer(2 * time.Second)
-		defer deadline.Stop()
 		select {
 		case <-p.done:
-		case <-deadline.C:
-			return
-		}
-		for _, t := range terminals {
-			select {
-			case <-t.done:
-			case <-deadline.C:
-				return
-			}
+		case <-time.After(2 * time.Second):
 		}
 	})
 }
@@ -197,150 +176,29 @@ func (p *Process) RequestPermission(ctx context.Context, req acp.RequestPermissi
 	return p.hooks.Permission(ctx, req)
 }
 
-// OpenSession grants a session client file access within its effective root
-// set: its working directory followed by the additional directories it was
-// created or loaded with. One process can serve several sessions.
-func (p *Process) OpenSession(session string, cwd string, additional []string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.roots[acp.SessionId(session)] = append([]string{cwd}, additional...)
-}
-
-// ForgetSession revokes a session's file access and kills its terminals.
-func (p *Process) ForgetSession(session string) {
-	p.mu.Lock()
-	delete(p.roots, acp.SessionId(session))
-	for id, t := range p.terminals {
-		if t.session == acp.SessionId(session) {
-			t.kill()
-			delete(p.terminals, id)
-		}
-	}
-	p.mu.Unlock()
-}
-
-func (p *Process) sessionRoots(session acp.SessionId) ([]string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	roots, ok := p.roots[session]
-	if !ok {
-		return nil, fmt.Errorf("unknown session %q", session)
-	}
-	return roots, nil
-}
-
-// Client file access is restricted to the session's roots, including symlinks.
-// This is not a sandbox: the agent executable and its commands run as the user.
-func (p *Process) rootPath(session acp.SessionId, path string) (*os.Root, string, error) {
-	if !filepath.IsAbs(path) {
-		return nil, "", errors.New("ACP file paths must be absolute")
-	}
-	roots, err := p.sessionRoots(session)
-	if err != nil {
-		return nil, "", err
-	}
-	for _, dir := range roots {
-		rel, err := filepath.Rel(dir, path)
-		if err == nil && filepath.IsLocal(rel) {
-			root, err := os.OpenRoot(dir)
-			return root, rel, err
-		}
-	}
-	return nil, "", errors.New("file is outside this session's workspace roots")
-}
-
-func (p *Process) ReadTextFile(_ context.Context, req acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	root, rel, err := p.rootPath(req.SessionId, req.Path)
-	if err != nil {
-		return acp.ReadTextFileResponse{}, err
-	}
-	defer root.Close()
-	f, err := root.Open(rel)
-	if err != nil {
-		return acp.ReadTextFileResponse{}, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
-	if err != nil {
-		return acp.ReadTextFileResponse{}, err
-	}
-	if len(b) > 8*1024*1024 {
-		return acp.ReadTextFileResponse{}, errors.New("text file exceeds 8 MiB")
-	}
-	if !utf8.Valid(b) {
-		return acp.ReadTextFileResponse{}, errors.New("file is not UTF-8 text")
-	}
-	text := string(b)
-	if req.Line != nil || req.Limit != nil {
-		lines := strings.SplitAfter(text, "\n")
-		start := 0
-		if req.Line != nil {
-			start = *req.Line - 1
-		}
-		if start < 0 || (req.Limit != nil && *req.Limit < 0) {
-			return acp.ReadTextFileResponse{}, errors.New("invalid line range")
-		}
-		start = min(start, len(lines))
-		end := len(lines)
-		if req.Limit != nil {
-			end = start + min(*req.Limit, len(lines)-start)
-		}
-		text = strings.Join(lines[start:end], "")
-	}
-	return acp.ReadTextFileResponse{Content: text}, nil
-}
-
-func (p *Process) WriteTextFile(_ context.Context, req acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	root, rel, err := p.rootPath(req.SessionId, req.Path)
-	if err != nil {
-		return acp.WriteTextFileResponse{}, err
-	}
-	defer root.Close()
-	if len(req.Content) > 8*1024*1024 {
-		return acp.WriteTextFileResponse{}, errors.New("text file exceeds 8 MiB")
-	}
-	if err = root.MkdirAll(filepath.Dir(rel), 0755); err == nil {
-		err = root.WriteFile(rel, []byte(req.Content), 0644)
-	}
-	return acp.WriteTextFileResponse{}, err
-}
-
-// tailBuffer bounds retained process output and is safe for concurrent stdout/stderr.
+// tailBuffer retains the end of the agent's stderr for error reports.
 type tailBuffer struct {
-	mu        sync.Mutex
-	data      []byte
-	limit     int
-	truncated bool
-	onWrite   func()
+	mu    sync.Mutex
+	data  []byte
+	limit int
 }
 
 func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer func() {
-		b.mu.Unlock()
-		if b.onWrite != nil {
-			b.onWrite()
-		}
-	}()
-	n := len(p)
-	if len(p) >= b.limit {
-		b.truncated = b.truncated || len(b.data)+len(p) > b.limit
-		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
-	} else {
-		b.data = append(b.data, p...)
-		if len(b.data) > b.limit {
-			b.data = append(b.data[:0], b.data[len(b.data)-b.limit:]...)
-			b.truncated = true
-		}
+	defer b.mu.Unlock()
+	b.data = append(b.data, p...)
+	if len(b.data) > b.limit {
+		b.data = append(b.data[:0], b.data[len(b.data)-b.limit:]...)
 	}
-	return n, nil
+	return len(p), nil
 }
-func (b *tailBuffer) snapshot() (string, bool) {
+
+func (b *tailBuffer) snapshot() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	d := b.data
 	for len(d) > 0 && !utf8.RuneStart(d[0]) {
 		d = d[1:]
 	}
-	return strings.ToValidUTF8(string(d), "�"), b.truncated
+	return strings.ToValidUTF8(string(d), "�")
 }

@@ -2,12 +2,14 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,9 +22,21 @@ import (
 	"github.com/spachava753/mu/internal/state"
 )
 
+// Permission is a pending session/request_permission. Request is never
+// modified after it arrives.
 type Permission struct {
 	ID      string
 	Request acp.RequestPermissionRequest
+	// Tool describes the operation: the tool call Mu has projected from the
+	// agent's updates, patched with the fields the request supplies. Requests
+	// often name only the tool call ID. It is derived for each snapshot, since
+	// the SDK can deliver a request before an earlier tool_call notification.
+	Tool PermissionTool
+}
+
+// PermissionTool is the visible description of a permission request's tool call.
+type PermissionTool struct {
+	Title, Kind, Text, Details string
 }
 
 // Conversation is a transient projection of agent replay and live updates.
@@ -66,13 +80,14 @@ var errAppClosing = errors.New("app is closing")
 
 type pending struct {
 	Permission
-	answer chan acp.PermissionOptionId
+	seq       uint64 // order in which Mu received the request
+	answer    chan acp.PermissionOptionId
+	cancelled chan struct{}
 }
 type job struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	done       chan struct{}
-	stop       chan struct{}
 	stopping   bool
 	promptDone chan struct{}
 	stopDone   chan struct{}
@@ -87,7 +102,6 @@ type runtime struct {
 	status, err    string
 	acceptUpdates  bool
 	pending        map[string]*pending
-	outputs        map[string]string
 	tools          map[string]*toolCall
 	epoch          uint64
 	initializing   bool
@@ -123,6 +137,7 @@ type App struct {
 	storageError      string
 	shutdownErrors    []error
 	closingSessions   map[[3]string]chan struct{}
+	permissionSeq     uint64
 	connections       map[[2]string]*connection
 	catalog           Catalog
 	catalogCancel     context.CancelFunc
@@ -132,6 +147,8 @@ type App struct {
 	// take before Mu terminates the agent process. Cancelling can involve
 	// finishing a tool call or other cleanup in the agent, so it is generous.
 	agentDeadline time.Duration
+	// discoveryTimeout bounds one discovery; tests shorten it.
+	discoveryTimeout time.Duration
 }
 
 // AgentDeadline is how long Mu waits for an agent to end a cancelled turn or
@@ -145,7 +162,7 @@ func Open(dir, defaultWorkingDir string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -197,7 +214,7 @@ func (a *App) threadLocked(id string) *thread {
 func (a *App) runtimeLocked(id string) *runtime {
 	r := a.runtimes[id]
 	if r == nil {
-		r = &runtime{pending: map[string]*pending{}, outputs: map[string]string{}, tools: map[string]*toolCall{}}
+		r = &runtime{pending: map[string]*pending{}, tools: map[string]*toolCall{}}
 		a.runtimes[id] = r
 	}
 	return r
@@ -217,10 +234,18 @@ func (a *App) Snapshot() Snapshot {
 			v.Status, v.Error = r.status, r.err
 			v.Connected = r.live()
 			v.Configuring, v.SessionError = r.configuring || r.closing != nil, r.sessionError
-			for _, p := range r.pending {
-				v.Permissions = append(v.Permissions, p.Permission)
+			pending := slices.SortedFunc(maps.Values(r.pending), func(a, b *pending) int { return cmp.Compare(a.seq, b.seq) })
+			for _, p := range pending {
+				permission := p.Permission
+				toolID := string(p.Request.ToolCall.ToolCallId)
+				known := r.tools[toolID]
+				if r.initializing {
+					// While loading, the session's updates are still buffered.
+					known = bufferedTool(r.initialUpdates, toolID)
+				}
+				permission.Tool = permissionTool(known, p.Request.ToolCall)
+				v.Permissions = append(v.Permissions, permission)
 			}
-			slices.SortFunc(v.Permissions, func(a, b Permission) int { return strings.Compare(a.ID, b.ID) })
 		}
 		s.Threads = append(s.Threads, v)
 	}
@@ -373,7 +398,7 @@ func (a *App) Send(id, text string) error {
 		return errors.New("wait for the session request to finish")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	j := &job{ctx: ctx, cancel: cancel, done: make(chan struct{}), stop: make(chan struct{}), promptDone: make(chan struct{})}
+	j := &job{ctx: ctx, cancel: cancel, done: make(chan struct{}), promptDone: make(chan struct{})}
 	before := *t.Thread
 	if t.Title == "New thread" {
 		title := []rune(strings.Join(strings.Fields(text), " "))
@@ -485,12 +510,12 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	epoch := r.epoch
 	r.initializing, r.initialUpdates, r.acceptUpdates = true, nil, false
 	r.session, r.echo = "", promptEcho{}
-	r.outputs, r.tools = map[string]string{}, map[string]*toolCall{}
+	r.tools = map[string]*toolCall{}
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); r.initializing = false; r.initialUpdates = nil; a.mu.Unlock() }()
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	c, err := a.acquire(initCtx, t)
+	c, err := a.acquire(initCtx, t.AgentID, t.Command)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +532,6 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		a.mu.Lock()
 		c.routes[t.SessionID] = route{t.ID, r, epoch}
 		a.mu.Unlock()
-		p.OpenSession(t.SessionID, t.Cwd, t.AdditionalDirectories)
 		var loaded acp.LoadSessionResponse
 		loaded, err = p.Conn.LoadSession(initCtx, acp.LoadSessionRequest{SessionId: acp.SessionId(t.SessionID), Cwd: t.Cwd, AdditionalDirectories: t.AdditionalDirectories, McpServers: []acp.McpServer{}})
 		options, modes, meta = loaded.ConfigOptions, loaded.Modes, loaded.Meta
@@ -542,9 +566,6 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	}
 	boundary := len(r.initialUpdates)
 	a.mu.Unlock()
-	if creating && acknowledged {
-		p.OpenSession(sessionID, t.Cwd, nil)
-	}
 	if err == nil && sessionID == "" {
 		err = errors.New("agent returned an empty session ID")
 	}
@@ -589,7 +610,6 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 			r.session = sessionID
 		} else if t.SessionID != "" {
 			delete(c.routes, t.SessionID)
-			p.ForgetSession(t.SessionID)
 		}
 		a.detachLocked(r)
 	}
@@ -609,7 +629,9 @@ func (a *App) Stop(id string) {
 	}
 	j, session := r.job, r.session
 	j.stopping = true
-	close(j.stop)
+	// ACP requires every pending permission request of a cancelled turn to be
+	// answered as cancelled.
+	cancelPermissionsLocked(r)
 	r.status = "Stopping…"
 	a.notifyLocked()
 	if !r.live() {
@@ -640,26 +662,38 @@ func (a *App) Stop(id string) {
 	}()
 }
 
+// permission shows a request until the user answers it. Agents may ask
+// outside a prompt turn too. A request is answered as cancelled when its turn
+// is being stopped, when the agent withdraws it or its process closes, or when
+// Mu detaches the session (cancelPermissionsLocked).
 func (a *App) permission(ctx context.Context, id string, r *runtime, epoch uint64, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	a.mu.Lock()
-	j := r.job
-	if j == nil || j.stopping || a.closed || r.epoch != epoch {
+	if a.closed || r.epoch != epoch || (r.job != nil && r.job.stopping) {
 		a.mu.Unlock()
 		return agent.CancelledPermission(), nil
 	}
-	p := &pending{Permission: Permission{ID: state.ID(), Request: req}, answer: make(chan acp.PermissionOptionId, 1)}
+	a.permissionSeq++
+	p := &pending{Permission: Permission{ID: state.ID(), Request: req}, seq: a.permissionSeq, answer: make(chan acp.PermissionOptionId, 1), cancelled: make(chan struct{})}
 	r.pending[p.ID] = p
 	a.notifyLocked()
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(r.pending, p.ID); a.notifyLocked(); a.mu.Unlock() }()
 	select {
 	case <-ctx.Done():
-	case <-j.ctx.Done():
-	case <-j.stop:
+	case <-p.cancelled:
 	case option := <-p.answer:
 		return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Selected: &acp.RequestPermissionOutcomeSelected{OptionId: option}}}, nil
 	}
 	return agent.CancelledPermission(), nil
+}
+
+// cancelPermissionsLocked answers every pending request of the runtime's
+// session as cancelled.
+func cancelPermissionsLocked(r *runtime) {
+	for id, p := range r.pending {
+		close(p.cancelled)
+		delete(r.pending, id)
+	}
 }
 
 func (a *App) Answer(id, permissionID string, option acp.PermissionOptionId) {
@@ -695,6 +729,7 @@ func (a *App) detachLocked(r *runtime) {
 	}
 	r.conn, r.session, r.acceptUpdates = nil, "", false
 	r.epoch++
+	cancelPermissionsLocked(r)
 	if rt, ok := c.routes[session]; ok && rt.r == r {
 		delete(c.routes, session)
 	}
@@ -745,6 +780,7 @@ func (a *App) Close() error {
 			c.cancel()
 		}
 	}
+	a.stopIdleLocked()
 	for _, r := range a.runtimes {
 		if r.job != nil {
 			r.job.cancel()

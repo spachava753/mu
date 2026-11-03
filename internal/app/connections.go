@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -13,9 +14,11 @@ import (
 
 // connection is one agent process shared by every thread whose sessions use
 // the same agent configuration: saved agent ID and command snapshot. ACP
-// multiplexes sessions on a connection, so notifications, permission requests
-// and terminal output are routed to threads by session ID. The process starts
-// in the general working directory and is terminated once no thread uses it.
+// multiplexes sessions on a connection, so notifications and permission
+// requests are routed to threads by session ID. Discovery lists sessions on it
+// too. The process starts in the general working directory. A saved agent's
+// process keeps running while idle (see keepLocked); others are terminated
+// once nothing uses them.
 type connection struct {
 	key     [2]string
 	process *agent.Process
@@ -52,10 +55,10 @@ func (c *connection) alive() bool {
 	return c != nil && c.started() && c.err == nil && c.process.Alive()
 }
 
-// acquire returns a started connection for the thread's agent configuration,
-// starting its process if needed. Every successful call must be released.
-func (a *App) acquire(ctx context.Context, t state.Thread) (*connection, error) {
-	key := [2]string{t.AgentID, t.Command}
+// acquire returns a started connection for an agent configuration, starting
+// its process if needed. Every successful call must be released.
+func (a *App) acquire(ctx context.Context, agentID, command string) (*connection, error) {
+	key := [2]string{agentID, command}
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -71,7 +74,7 @@ func (a *App) acquire(ctx context.Context, t state.Thread) (*connection, error) 
 		c = &connection{key: key, ready: make(chan struct{}), cancel: cancel, routes: map[string]route{}, unrouted: map[string][]acp.SessionNotification{}}
 		a.connections[key] = c
 		a.wg.Add(1)
-		go a.start(ctx, c, t.Command, a.workingDirectoryLocked())
+		go a.start(ctx, c, command, a.workingDirectoryLocked())
 	}
 	c.users++
 	a.mu.Unlock()
@@ -89,7 +92,8 @@ func (a *App) acquire(ctx context.Context, t state.Thread) (*connection, error) 
 }
 
 // start runs independently of any one thread, so a thread that stops waiting
-// does not fail startup for others. It is cancelled once nobody waits.
+// does not fail startup for others. It is cancelled once nobody waits, unless
+// the connection is kept.
 func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 	defer a.wg.Done()
 	defer c.cancel()
@@ -99,15 +103,14 @@ func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 		err = fmt.Errorf("working directory: %w", err)
 	} else {
 		p, err = agent.Start(ctx, command, cwd, agent.Hooks{
-			Update:   func(n acp.SessionNotification) { a.route(c, n) },
-			Terminal: func(session acp.SessionId, id, output string) { a.routeTerminal(c, session, id, output) },
+			Update: func(n acp.SessionNotification) { a.route(c, n) },
 			Permission: func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 				return a.routePermission(ctx, c, req)
 			},
 		})
 	}
 	a.mu.Lock()
-	unused := c.users == 0
+	unused := c.users == 0 && !a.keepLocked(c.key)
 	if err == nil && unused {
 		err = context.Canceled
 	}
@@ -122,7 +125,8 @@ func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 	}
 }
 
-// release drops one user and terminates the process once it has none.
+// release drops one user and terminates the process once it has none,
+// unless the connection is kept.
 func (a *App) release(c *connection) {
 	a.mu.Lock()
 	p := a.releaseLocked(c)
@@ -138,6 +142,9 @@ func (a *App) releaseLocked(c *connection) *agent.Process {
 	if c.users > 0 {
 		return nil
 	}
+	if a.connections[c.key] == c && (!c.started() || c.alive()) && a.keepLocked(c.key) {
+		return nil
+	}
 	if a.connections[c.key] == c {
 		delete(a.connections, c.key)
 	}
@@ -146,6 +153,34 @@ func (a *App) releaseLocked(c *connection) *agent.Process {
 		return nil
 	}
 	return c.process
+}
+
+// keepLocked reports whether an idle connection keeps running. A saved agent's
+// process stays up until the app closes or the saved configuration changes, so
+// opening threads, closing sessions and discovery do not restart it. One-off
+// commands and older command snapshots stop with their last user.
+func (a *App) keepLocked(key [2]string) bool {
+	return !a.closed && slices.ContainsFunc(a.data.Agents, func(c state.AgentConfig) bool {
+		return c.ID == key[0] && c.Command == key[1]
+	})
+}
+
+// stopIdleLocked terminates idle connections that are no longer kept. The
+// processes are closed off the app mutex, tracked by the wait group.
+func (a *App) stopIdleLocked() {
+	for key, c := range a.connections {
+		if c.users > 0 || a.keepLocked(key) {
+			continue
+		}
+		delete(a.connections, key)
+		if !c.started() {
+			c.cancel()
+			continue
+		}
+		p := c.process
+		a.wg.Add(1)
+		go func() { defer a.wg.Done(); p.Close() }()
+	}
 }
 
 func (a *App) route(c *connection, n acp.SessionNotification) {
@@ -160,15 +195,6 @@ func (a *App) route(c *connection, n acp.SessionNotification) {
 		return
 	}
 	a.receiveLocked(rt.thread, rt.r, rt.epoch, n)
-}
-
-func (a *App) routeTerminal(c *connection, session acp.SessionId, terminalID, output string) {
-	a.mu.Lock()
-	rt, ok := c.routes[string(session)]
-	a.mu.Unlock()
-	if ok {
-		a.terminalOutput(rt.thread, rt.r, rt.epoch, session, terminalID, output)
-	}
 }
 
 func (a *App) routePermission(ctx context.Context, c *connection, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {

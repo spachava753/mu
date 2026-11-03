@@ -49,6 +49,7 @@ func (a *App) SaveAgent(config state.AgentConfig, makeDefault bool) (string, err
 		a.data.Agents, a.data.DefaultAgentID = old, oldDefault
 		return "", err
 	}
+	a.stopIdleLocked() // An edited command no longer keeps the old process.
 	return config.ID, nil
 }
 
@@ -74,6 +75,7 @@ func (a *App) RemoveAgent(id string) error {
 		a.data.Agents, a.data.DefaultAgentID = old, oldDefault
 		return err
 	}
+	a.stopIdleLocked()
 	return nil // Existing threads keep their own command snapshot.
 }
 

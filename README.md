@@ -6,7 +6,7 @@ A small ACP desktop client, written entirely in Go with [MyGo](https://github.co
 - Save named agents and a default in **Settings**; reuse them when creating threads.
 - Collapse the thread sidebar; hover and selected-thread highlights remain distinct.
 - Use a matte, native interface that follows the desktop's light/dark appearance, with short transitions for panels, menus, and navigation.
-- Stream replies as selectable Markdown; inspect thinking, plans, tool results, and terminal output.
+- Stream replies as selectable Markdown; inspect thinking, plans, and tool results.
 - Change agent-reported session options and inspect context usage, limits, and cost.
 - Answer agent permission requests, or stop a running turn.
 - Discover agent sessions and explicitly import selected references, including sessions created in other clients.
@@ -14,6 +14,10 @@ A small ACP desktop client, written entirely in Go with [MyGo](https://github.co
 - Rebuild conversations from agent-owned history across restarts; Mu does not persist transcripts.
 
 This is intentionally a single-window, text-chat client. Configure authentication and startup settings with the agent's own CLI. Model and other session controls appear only when the agent exposes them over ACP; Mu supplies no model catalog or provider defaults. It does not provide remote ACP transports, attachment input, or MCP configuration.
+
+## Client capabilities
+
+Mu advertises no client file system (`fs/*`) or terminal (`terminal/*`) methods: agents read and write files and run commands themselves. ACP v2 removes both from the protocol. If an agent requests them anyway, Mu answers that the method is not found. A tool call that refers to a terminal is shown as a placeholder.
 
 ## Required agent capabilities
 
@@ -48,7 +52,7 @@ A **project** is a name for an existing folder. Every thread created in a projec
 
 For a new thread, the agent starts on the first message or when you open **Session options**. Opening a saved session starts its agent and loads history automatically, including the selected thread at application startup.
 
-Threads that use the same agent configuration share one agent process, as ACP allows: each thread is a separate session on that connection, and sessions can work at the same time. The process starts in the working directory and stops when its last session closes. If it exits, its threads reconnect on a new process when next used. Threads with different configurations use different processes.
+Threads that use the same agent configuration share one agent process, as ACP allows: each thread is a separate session on that connection, and sessions can work at the same time. Discovery uses the same process. The process starts in the working directory. A saved agent's process keeps running while idle, so opening, archiving, and discovering do not restart it; it stops when Mu quits or when that saved agent is edited or removed and no session still uses it. Threads using a one-off command or an older command snapshot stop their process when their last session closes. If it exits, its threads reconnect on a new process when next used. Threads with different configurations use different processes.
 
 Each sidebar row shows the thread's agent, its folder when it is not a project or Mu-created folder, and last activity, or its most urgent state (working, needs permission, agent error). The sidebar toggle preserves its collapsed state across restarts; New thread, Import sessions, and Settings remain available in the collapsed rail.
 
@@ -77,6 +81,12 @@ The sidebar resizes over 220 ms, highlights fade over 120 ms, and menus/dialogs/
 
 Session updates are processed while idle as well as during prompts. Mu handles user/assistant/thought chunks, grouped into messages by the agent's message IDs when it sends them (otherwise adjacent chunks of the same kind form one message); tool calls and their partial updates, which change only the fields they include; legacy and ID-addressed plans/removals, available commands, current modes, configuration changes, session info, and usage updates exposed by the ACP SDK. Non-text content is retained with a readable placeholder and inspectable protocol details. Setup notifications are buffered; a successful `session/load` replaces the in-memory conversation with the replay, and session options or modes in the load response take precedence over older values replayed before it. A failed load leaves the old view unchanged and displays an error, rather than exposing a partial replay as complete history. Unsupported experimental capabilities, such as compaction, are not advertised.
 
+## Permission requests
+
+Agents ask before some tool calls with ACP `session/request_permission`. Mu shows each request as a card, in the order it receives them, until you choose one of the agent's options; the sidebar marks the thread **Needs permission**. A request often names only a tool call the agent already reported, so the card describes that tool call: its title, kind (such as Execute or Edit), locations, and content such as diffs, or else its input, with the full protocol details on request. Fields in the request take precedence. Options that remember a choice ("always") are remembered by the agent, not by Mu; Mu has no automatic approvals.
+
+Requests can arrive outside a prompt turn and are shown the same way. Mu answers a request as cancelled only when you stop its session's turn (as ACP requires), when the agent withdraws it, or when the session is archived, removed, reloaded, or disconnected, or Mu quits.
+
 ## Pi compatibility
 
 The previously tested `pi-acp@0.0.34` adapter is **not compatible with this session policy**. It advertises list/load (and delete), but not close/fork. Mu rejects it at initialization. Upgrade to an adapter that advertises and implements the required methods; Mu does not special-case Pi or supply missing capabilities. Pi's `_meta.terminal_output` data is kept as inspectable metadata, not shown as terminal output.
@@ -85,17 +95,17 @@ The optional installation in `.tools/` remains ignored and is not bundled into M
 
 ## Discovery and thread semantics
 
-Choose **Import sessions** in the sidebar, select a saved agent, then **Find sessions**. Discovery follows the agent's pagination across all exposed directories on a separate process started in the working directory, without creating/loading sessions or sending prompts. Filter by title, directory, or session ID, select rows, and choose **Add selected to Mu**. Nothing is selected or imported automatically. History loads only when an imported thread is opened.
+Choose **Import sessions** in the sidebar, select a saved agent, then **Find sessions**. Discovery follows the agent's pagination across all exposed directories on the agent's shared process, starting it in the working directory if needed, without creating/loading sessions or sending prompts. Filter by title, directory, or session ID, select rows, and choose **Add selected to Mu**. Nothing is selected or imported automatically. History loads only when an imported thread is opened.
 
 - Session identity is scoped to the saved configuration ID and its command snapshot, not just the session ID or agent display name. Editing a command cannot silently retarget existing references. Mu cannot infer that two different configurations share a session store, or detect an external account/storage change hidden behind an unchanged command.
 - Refreshing discovery updates cached titles/activity for managed references. A reference missing from a complete listing is marked **not listed**, not deleted. Failed or incomplete listings do not reconcile references.
-- A session's working directory cannot change in ACP. If a listing reports a different one, Mu shows a notice and suggests re-importing. Additional directories are supplied on each load: if a listing reports different ones, Mu keeps loading the session with the directories accepted at import and shows a notice. Listings never widen file access.
+- A session's working directory cannot change in ACP. If a listing reports a different one, Mu shows a notice and suggests re-importing. Additional directories are supplied on each load: if a listing reports different ones, Mu keeps loading the session with the directories accepted at import and shows a notice. Listings never change the directories Mu supplies.
 - **Fork** and **Archive** are buttons in the thread header. **Reload history** (or **Retry connection**) and **Remove from Mu…** are in its **More thread actions** menu; Archive and Remove are also in a thread row's context menu.
 - A load error keeps the existing reference and shows **Retry connection** beside the error. Mu never creates a replacement session automatically. **Reload history** closes the connection and replaces the view with a fresh replay, including external changes.
 - **Archive** hides a thread from the active list and closes its idle agent session. **Show archived → Restore** loads it again.
 - **Remove from Mu** requires confirmation and removes only Mu's reference. It does not call agent-side deletion or remove workspace files. The session can be imported again.
 - **Fork** sends ACP `session/fork` on the source thread's connection, connecting it first if needed; the agent creates the fork. The source stays connected and unchanged. The fork response contains no history, so Mu closes the fork, saves the new reference, and loads its history from the agent on the same connection when it is opened. No transcript is copied or supplied as a prompt; workspace files are not rolled back.
-- Archiving, removing, reloading, and shutdown request `session/close` for a live session; its process stops when no other session uses it. A close failure is surfaced. If the agent does not answer within ten seconds, Mu terminates the process so cleanup cannot hang, which also disconnects other sessions on it.
+- Archiving, removing, reloading, and shutdown request `session/close` for a live session; the process stops only as described under Agent connections. A close failure is surfaced. If the agent does not answer within ten seconds, Mu terminates the process so cleanup cannot hang, which also disconnects other sessions on it.
 - Another client can still use an imported session. Mu prevents conflicting local operations on the same managed reference, but does not promise cross-client locking.
 
 ## Local data and trust
@@ -106,7 +116,7 @@ Writes use a private temporary file and atomic replacement; an exclusive lock pr
 
 Mu is a greenfield project with no established data model and no users depending on existing data. Persistence is not versioned. Breaking data-model or persistence changes require wiping existing Mu-owned local data during development, not adding migrations, compatibility code, or automatic startup resets. Agent-owned sessions and workspace files are never part of that wipe; use **Import sessions** to add session references again.
 
-**Mu is not a sandbox.** Agent executables inherit your environment and run with your user permissions. Only run agents and commands you trust. Permission controls answer requests the agent actually sends; Mu cannot force every agent tool to request approval. Client-delegated file reads/writes are confined to the requesting session's roots: its working directory plus the additional directories it was loaded with (including symlink checks), with an 8 MiB text limit. Sessions sharing a process cannot use each other's roots. Delegated terminal commands run as your user, with output capped at 1 MiB per terminal. On Unix, cancellation/cleanup terminates process groups; on Windows only direct child termination is implemented.
+**Mu is not a sandbox.** Agent executables inherit your environment and run with your user permissions. Only run agents and commands you trust. Permission controls answer requests the agent actually sends; Mu cannot force every agent tool to request approval. Mu performs no file access or command execution on an agent's behalf. On Unix, cleanup terminates the agent's process group; on Windows only direct child termination is implemented.
 
 No telemetry or automatic network calls are made by Mu itself. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
 
@@ -118,7 +128,7 @@ go vet ./...
 go build -o bin/mu .
 ```
 
-The normal suite needs no credentials or model calls. It includes a real stdio fixture process, settings persistence, session configuration and updates, agent replay and native fork behavior, paginated discovery/selective import, external deletion, permissions, graceful and forced cancellation, agent failures, filesystem confinement, terminal lifecycle, and MyGo headless interaction tests at 1100×780 and 800×600. The UI tests exercise row highlights, sidebar collapse, saved agents, session option changes, 100-model menus, and slash completion with 80 commands using mouse and keyboard.
+The normal suite needs no credentials or model calls. It includes a real stdio fixture process, settings persistence, session configuration and updates, agent replay and native fork behavior, paginated discovery/selective import, external deletion, permissions, graceful and forced cancellation, agent failures, and MyGo headless interaction tests at 1100×780 and 800×600. The UI tests exercise row highlights, sidebar collapse, saved agents, session option changes, 100-model menus, and slash completion with 80 commands using mouse and keyboard.
 
 To save native-renderer QA screenshots in both sizes and themes:
 
@@ -137,7 +147,7 @@ MU_QA_RENDER_DIR="$PWD/.qa/motion" go test ./internal/desktop -run '^TestRecordM
 - `main.go`: startup and native window lifecycle.
 - `internal/desktop`: MyGo views and headless interaction tests.
 - `internal/app`: thread lifecycle and streamed update handling.
-- `internal/agent`: ACP Go SDK integration, child processes, file and terminal requests.
+- `internal/agent`: ACP Go SDK integration and the agent child process.
 - `internal/state`: session references, atomic storage and locking.
 - `GLOSSARY.md`: session ownership and discovery/import terminology.
 

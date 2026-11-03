@@ -2,6 +2,7 @@ package desktop_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +214,80 @@ func TestQAThreadControls(t *testing.T) {
 			if !tt.HasText("No thread selected") {
 				t.Fatal("deleted thread still selected")
 			}
+		})
+	}
+}
+
+// Permission cards describe the tool call from Mu's projection, follow arrival
+// order, and appear outside a running turn.
+func TestQAPermissionCards(t *testing.T) {
+	for _, size := range [][2]int{{1100, 780}, {800, 600}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			a := testApp(t)
+			view := desktop.New(a, testutil.Agent(t))
+			tt := ui.NewTester(view.Draw, size[0], size[1])
+			tt.Frame()
+			click(t, tt, "Create thread")
+			send := func(text string) {
+				t.Helper()
+				click(t, tt, "Message")
+				tt.Type(text)
+				tt.Key(0, ui.KeyEnter)
+				tt.Frame()
+			}
+			pending := func(n int) func(app.Snapshot) bool {
+				return func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == n }
+			}
+			idle := func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Permissions) == 0 }
+
+			// The request names only a known tool call.
+			send("permission-ref")
+			waitView(t, a, tt, pending(1))
+			for _, text := range []string{"Permission needed for Edit notes", "Edit", "Always allow edits", "Tool / protocol details"} {
+				if _, ok := tt.Find(text); !ok {
+					t.Fatalf("permission card lacks %q: %v", text, tt.Texts())
+				}
+			}
+			if !slices.ContainsFunc(tt.Texts(), func(s string) bool { return strings.HasPrefix(s, "/workspace/notes.txt:3\n") }) {
+				t.Fatal("permission card lacks the tool call's location and diff", tt.Texts())
+			}
+			screenshot(t, tt, fmt.Sprintf("permission-tool-%d", size[0]))
+			// Expanded details stay bounded: the composer remains in view, and
+			// clicking the option (not merely finding it) answers the request.
+			click(t, tt, "Tool / protocol details")
+			for _, label := range []string{"Message", "Stop"} {
+				r, ok := tt.Find(label)
+				if !ok || r.Y < 0 || r.Y+r.H > float32(size[1]) {
+					t.Fatalf("%q is out of view with details expanded: %v %v", label, r, ok)
+				}
+			}
+			screenshot(t, tt, fmt.Sprintf("permission-details-%d", size[0]))
+			click(t, tt, "Always allow edits")
+			waitView(t, a, tt, idle)
+			if entries := a.Snapshot().Threads[0].Entries; !strings.Contains(entries[len(entries)-1].Text, `"optionId":"always"`) {
+				t.Fatal("the visible option did not answer the request")
+			}
+
+			send("permissions-two")
+			waitView(t, a, tt, pending(2))
+			first, ok1 := tt.Find("Permission needed for First")
+			second, ok2 := tt.Find("Permission needed for Second")
+			if !ok1 || !ok2 || first.Y >= second.Y {
+				t.Fatalf("permission cards out of arrival order: %v %v", first, second)
+			}
+			screenshot(t, tt, fmt.Sprintf("permissions-two-%d", size[0]))
+			click(t, tt, "Stop")
+			waitView(t, a, tt, idle)
+
+			send("permission-idle")
+			waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Permissions) == 1 })
+			_, kind := tt.Find("Execute")
+			if !tt.HasText("Permission needed for Background task") || !kind {
+				t.Fatal("idle permission card is not visible", tt.Texts())
+			}
+			screenshot(t, tt, fmt.Sprintf("permission-idle-%d", size[0]))
+			click(t, tt, "Reject")
+			waitView(t, a, tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 0 })
 		})
 	}
 }

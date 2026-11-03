@@ -48,12 +48,10 @@ func (p *Process) Bounded(timeout time.Duration, request func(context.Context) e
 	}
 }
 
-// CloseSession releases one session's agent resources, then revokes its local
-// file and terminal access. Other sessions on the process are unaffected unless
-// the agent fails to respond within timeout, in which case Bounded terminates
-// the process.
+// CloseSession releases one session's agent resources. Other sessions on the
+// process are unaffected unless the agent fails to respond within timeout, in
+// which case Bounded terminates the process.
 func (p *Process) CloseSession(session string, timeout time.Duration) error {
-	defer p.ForgetSession(session)
 	if session == "" || !p.Alive() {
 		return nil
 	}
