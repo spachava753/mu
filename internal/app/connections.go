@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/spachava753/mu/internal/agent"
@@ -26,6 +25,7 @@ type connection struct {
 	err     error         // startup error, valid after ready
 	cancel  context.CancelFunc
 	users   int
+	retired bool // taken out of use and stopped; see retireLocked
 	routes  map[string]route
 	// Notifications for a session/new request arrive before its response
 	// reveals the session ID. They are held only while such a request is
@@ -60,21 +60,40 @@ func (c *connection) alive() bool {
 func (a *App) acquire(ctx context.Context, agentID, command string) (*connection, error) {
 	key := [2]string{agentID, command}
 	a.mu.Lock()
-	if a.closed {
+	var c *connection
+	for {
+		if a.closed {
+			a.mu.Unlock()
+			return nil, errAppClosing
+		}
+		c = a.connections[key]
+		if c != nil && c.started() && !c.alive() {
+			// The transport ended, but the process may still be exiting. Stop
+			// it now; threads still holding it release it themselves.
+			a.retireLocked(c)
+			c = nil
+		}
+		if c != nil {
+			break
+		}
+		// A replacement never overlaps the old process's shutdown, during
+		// which it may still be saving sessions or holding their store.
+		stopping := a.stopping[key]
+		if stopping == nil {
+			startCtx, cancel := context.WithTimeout(context.Background(), startTimeout)
+			c = &connection{key: key, ready: make(chan struct{}), cancel: cancel, routes: map[string]route{}, unrouted: map[string][]acp.SessionNotification{}}
+			a.connections[key] = c
+			a.wg.Add(1)
+			go a.start(startCtx, c, command, a.workingDirectoryLocked())
+			break
+		}
 		a.mu.Unlock()
-		return nil, errAppClosing
-	}
-	c := a.connections[key]
-	if c != nil && c.started() && !c.alive() {
-		delete(a.connections, key) // Threads still holding it release it themselves.
-		c = nil
-	}
-	if c == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		c = &connection{key: key, ready: make(chan struct{}), cancel: cancel, routes: map[string]route{}, unrouted: map[string][]acp.SessionNotification{}}
-		a.connections[key] = c
-		a.wg.Add(1)
-		go a.start(ctx, c, command, a.workingDirectoryLocked())
+		select {
+		case <-stopping:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		a.mu.Lock()
 	}
 	c.users++
 	a.mu.Unlock()
@@ -110,7 +129,8 @@ func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 		})
 	}
 	a.mu.Lock()
-	unused := c.users == 0 && !a.keepLocked(c.key)
+	// Retirement is final, even if the configuration is saved again meanwhile.
+	unused := c.retired || (c.users == 0 && !a.keepLocked(c.key))
 	if err == nil && unused {
 		err = context.Canceled
 	}
@@ -118,41 +138,75 @@ func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 	if err != nil && a.connections[c.key] == c {
 		delete(a.connections, c.key)
 	}
+	if unused && p != nil {
+		a.stopLocked(c.key, p.Close)
+	}
 	close(c.ready)
 	a.mu.Unlock()
-	if unused && p != nil {
-		p.Close()
-	}
 }
 
 // release drops one user and terminates the process once it has none,
 // unless the connection is kept.
 func (a *App) release(c *connection) {
 	a.mu.Lock()
-	p := a.releaseLocked(c)
+	a.releaseLocked(c)
 	a.mu.Unlock()
-	if p != nil {
-		p.Close()
-	}
 }
 
-// releaseLocked returns a process the caller must close after unlocking.
-func (a *App) releaseLocked(c *connection) *agent.Process {
+func (a *App) releaseLocked(c *connection) {
 	c.users--
 	if c.users > 0 {
-		return nil
+		return
 	}
 	if a.connections[c.key] == c && (!c.started() || c.alive()) && a.keepLocked(c.key) {
-		return nil
+		return
 	}
+	a.retireLocked(c)
+}
+
+// retireLocked takes a connection out of use and ends its process, once:
+// it cancels an unfinished startup or closes the process, behind the
+// configuration's stopping barrier. Threads still holding it release it
+// without stopping it again.
+func (a *App) retireLocked(c *connection) {
 	if a.connections[c.key] == c {
 		delete(a.connections, c.key)
 	}
-	if !c.started() {
-		c.cancel()
-		return nil
+	if c.retired {
+		return
 	}
-	return c.process
+	c.retired = true
+	switch {
+	case !c.started():
+		// agent.Start closes a process whose startup is cancelled before it
+		// returns, so the startup worker's end is this process's exit.
+		c.cancel()
+		a.stopLocked(c.key, func() { <-c.ready })
+	case c.process != nil:
+		a.stopLocked(c.key, c.process.Close)
+	}
+}
+
+// stopLocked runs stop, which ends a process, off the app mutex, tracked by
+// the wait group. Until it and any earlier stop for the configuration have
+// finished, acquire does not start another process for that configuration.
+func (a *App) stopLocked(key [2]string, stop func()) {
+	done, previous := make(chan struct{}), a.stopping[key]
+	a.stopping[key] = done
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		stop()
+		if previous != nil {
+			<-previous
+		}
+		a.mu.Lock()
+		if a.stopping[key] == done {
+			delete(a.stopping, key)
+		}
+		close(done)
+		a.mu.Unlock()
+	}()
 }
 
 // keepLocked reports whether an idle connection keeps running. A saved agent's
@@ -172,14 +226,7 @@ func (a *App) stopIdleLocked() {
 		if c.users > 0 || a.keepLocked(key) {
 			continue
 		}
-		delete(a.connections, key)
-		if !c.started() {
-			c.cancel()
-			continue
-		}
-		p := c.process
-		a.wg.Add(1)
-		go func() { defer a.wg.Done(); p.Close() }()
+		a.retireLocked(c)
 	}
 }
 

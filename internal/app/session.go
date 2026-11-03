@@ -36,7 +36,8 @@ func (a *App) Connect(id string) error {
 	if r.live() {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	// connect bounds starting the agent and loading the session itself.
+	ctx, cancel := context.WithCancel(context.Background())
 	r.configuring, r.configCancel, r.sessionError, r.err = true, cancel, "", ""
 	config := *t.Thread
 	a.notifyLocked()
@@ -140,10 +141,14 @@ func (a *App) SetMode(id, mode string) error {
 		if s.Modes == nil || !slices.ContainsFunc(s.Modes.AvailableModes, func(m acp.SessionMode) bool { return string(m.Id) == mode }) {
 			return nil, errors.New("session mode not found")
 		}
+		r := a.runtimes[id] // prepare and apply run with the app mutex held
+		updates := r.modeUpdates
 		return func(ctx context.Context, p *agent.Process) (func(*state.Session), error) {
 			_, err := p.Conn.SetSessionMode(ctx, acp.SetSessionModeRequest{SessionId: session, ModeId: acp.SessionModeId(mode)})
 			return func(s *state.Session) {
-				if s.Modes != nil {
+				// A current_mode_update received meanwhile is the agent's own
+				// account of the mode, and wins.
+				if s.Modes != nil && r.modeUpdates == updates {
 					s.Modes.CurrentModeId = acp.SessionModeId(mode)
 				}
 			}, err
@@ -193,6 +198,7 @@ func (a *App) changeSession(id string, prepare sessionChange) error {
 			r.sessionError = p.Error(err).Error()
 		} else if current := a.threadLocked(id); current != nil {
 			apply(&current.Session)
+			r.sessionVersion++
 			_ = a.saveLocked()
 		}
 		a.notifyLocked()

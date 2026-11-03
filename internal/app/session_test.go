@@ -98,12 +98,19 @@ func TestSessionOptionsAndAllUpdates(t *testing.T) {
 	if users != 1 || thoughts != 1 || tools != 1 || legacyPlans != 1 {
 		t.Fatalf("updates missing or prompt echo duplicated: user=%d thought=%d tool=%d plan=%d", users, thoughts, tools, legacyPlans)
 	}
-	// Snapshot callers cannot mutate the application's nested SDK values.
+	// Snapshots share a read-only deep copy; even a caller that modifies it
+	// cannot reach the application's nested SDK values.
 	v.Session.Options[0].Select.Name = "corrupted"
 	v.Session.Metadata["test"] = []byte(`true`)
-	if findThread(t, a, id).Session.Options[0].Select.Name == "corrupted" {
+	a.mu.Lock()
+	r := a.runtimes[id]
+	_, aliased := r.Session.Metadata["test"]
+	if r.Session.Options[0].Select.Name == "corrupted" || aliased {
+		a.mu.Unlock()
 		t.Fatal("snapshot aliases live session state")
 	}
+	r.cloneVersion = 0 // Discard the copy this test modified.
+	a.mu.Unlock()
 	before := len(v.Entries)
 	if err := a.Close(); err != nil {
 		t.Fatal(err)

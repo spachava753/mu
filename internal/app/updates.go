@@ -55,9 +55,11 @@ func toolText(content []acp.ToolCallContent, raw any) string {
 }
 
 func pretty(value any) string { b, _ := json.MarshalIndent(value, "", "  "); return string(b) }
-func storeMeta(s *state.Session, source string, meta map[string]any) {
+
+// storeMeta keeps extension metadata by source and reports whether it did.
+func storeMeta(s *state.Session, source string, meta map[string]any) bool {
 	if len(meta) == 0 {
-		return
+		return false
 	}
 	if s.Metadata == nil {
 		s.Metadata = map[string]json.RawMessage{}
@@ -66,6 +68,39 @@ func storeMeta(s *state.Session, source string, meta map[string]any) {
 	if err == nil {
 		s.Metadata[source] = b
 	}
+	return err == nil
+}
+
+// updateMeta returns an update's kind and _meta. The SDK's session info
+// variant does not decode _meta.
+func updateMeta(u acp.SessionUpdate) (string, map[string]any) {
+	switch {
+	case u.UserMessageChunk != nil:
+		return "user_message_chunk", u.UserMessageChunk.Meta
+	case u.AgentMessageChunk != nil:
+		return "agent_message_chunk", u.AgentMessageChunk.Meta
+	case u.AgentThoughtChunk != nil:
+		return "agent_thought_chunk", u.AgentThoughtChunk.Meta
+	case u.ToolCall != nil:
+		return "tool_call", u.ToolCall.Meta
+	case u.ToolCallUpdate != nil:
+		return "tool_call_update", u.ToolCallUpdate.Meta
+	case u.Plan != nil:
+		return "plan", u.Plan.Meta
+	case u.PlanUpdate != nil:
+		return "plan_update", u.PlanUpdate.Meta
+	case u.PlanRemoved != nil:
+		return "plan_removed", u.PlanRemoved.Meta
+	case u.AvailableCommandsUpdate != nil:
+		return "available_commands_update", u.AvailableCommandsUpdate.Meta
+	case u.CurrentModeUpdate != nil:
+		return "current_mode_update", u.CurrentModeUpdate.Meta
+	case u.ConfigOptionUpdate != nil:
+		return "config_option_update", u.ConfigOptionUpdate.Meta
+	case u.UsageUpdate != nil:
+		return "usage_update", u.UsageUpdate.Meta
+	}
+	return "", nil
 }
 
 // A connection generation prevents late notifications from a closed process
@@ -100,16 +135,10 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 		return
 	}
 	u := n.Update
-	storeMeta(&t.Session, "notification", n.Meta)
 	// Preserve extension metadata without guessing provider-specific semantics.
-	var envelope struct {
-		Kind string         `json:"sessionUpdate"`
-		Meta map[string]any `json:"_meta"`
-	}
-	if b, err := json.Marshal(u); err == nil {
-		_ = json.Unmarshal(b, &envelope)
-		storeMeta(&t.Session, envelope.Kind, envelope.Meta)
-	}
+	kind, meta := updateMeta(u)
+	sessionChanged := storeMeta(&t.Session, "notification", n.Meta)
+	sessionChanged = storeMeta(&t.Session, kind, meta) || sessionChanged
 	switch {
 	case u.UserMessageChunk != nil:
 		c := u.UserMessageChunk
@@ -131,6 +160,9 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 		v := u.ToolCall
 		call := newToolCall(v)
 		r.tools[string(v.ToolCallId)] = call
+		if r.job != nil && !r.initializing { // Not replayed history.
+			r.turnTools[string(v.ToolCallId)] = true
+		}
 		renderTool(t, string(v.ToolCallId), call)
 	case u.ToolCallUpdate != nil:
 		if !r.acceptUpdates {
@@ -143,6 +175,9 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 			r.tools[string(v.ToolCallId)] = call
 		}
 		call.patch(v)
+		if r.job != nil && !r.initializing { // Not replayed history.
+			r.turnTools[string(v.ToolCallId)] = true
+		}
 		renderTool(t, string(v.ToolCallId), call)
 	case u.Plan != nil:
 		setPlan(t, "legacy", planText(u.Plan.Entries), pretty(u.Plan))
@@ -160,25 +195,34 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 		t.Entries = slices.DeleteFunc(t.Entries, func(e state.Entry) bool { return e.Role == "plan" && e.PlanID == string(u.PlanRemoved.Id) })
 	case u.AvailableCommandsUpdate != nil:
 		t.Session.Commands = u.AvailableCommandsUpdate.AvailableCommands
+		sessionChanged = true
 	case u.ConfigOptionUpdate != nil:
 		t.Session.Options = u.ConfigOptionUpdate.ConfigOptions
+		sessionChanged = true
 	case u.CurrentModeUpdate != nil:
 		if t.Session.Modes == nil {
 			t.Session.Modes = &acp.SessionModeState{}
 		}
 		t.Session.Modes.CurrentModeId = u.CurrentModeUpdate.CurrentModeId
+		r.modeUpdates++
+		sessionChanged = true
 	case u.SessionInfoUpdate != nil:
 		v := u.SessionInfoUpdate
-		if v.Title != nil && strings.TrimSpace(*v.Title) != "" {
+		if v.Title != nil && strings.TrimSpace(*v.Title) != "" && *v.Title != t.Title {
 			t.Title = *v.Title
+			a.dirty = true // The title is the only persisted field an update changes.
 		}
 		if v.UpdatedAt != nil {
 			t.Session.AgentUpdatedAt = *v.UpdatedAt
+			sessionChanged = true
 		}
 	case u.UsageUpdate != nil:
 		t.Session.Usage = u.UsageUpdate
+		sessionChanged = true
 	}
-	a.dirty = true
+	if sessionChanged {
+		r.sessionVersion++
+	}
 	a.notifyLocked()
 }
 
@@ -239,6 +283,11 @@ func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 	}
 	if id != "" {
 		if e.id == "" && e.text == "" {
+			// Adopt a message as the echo only if it starts like the prompt;
+			// otherwise it is the agent's own user message, shown separately.
+			if !strings.HasPrefix(e.target, block.Text.Text) {
+				return false
+			}
 			e.id = id
 		}
 		if id != e.id {
@@ -294,6 +343,13 @@ type toolCall struct {
 	RawInput  any                    `json:"rawInput,omitempty"`
 	RawOutput any                    `json:"rawOutput,omitempty"`
 	Meta      map[string]any         `json:"_meta,omitempty"`
+	// cancelled marks an unfinished call of a turn the user stopped. It only
+	// changes the displayed status; later agent updates still apply.
+	cancelled bool
+}
+
+func (c *toolCall) finished() bool {
+	return c.Status == acp.ToolCallStatusCompleted || c.Status == acp.ToolCallStatusFailed
 }
 
 func newToolCall(v *acp.SessionUpdateToolCall) *toolCall {
@@ -358,6 +414,9 @@ func renderTool(t *thread, id string, c *toolCall) {
 		e = &t.Entries[len(t.Entries)-1]
 	}
 	e.Title, e.Status = c.Title, string(c.Status)
+	if c.cancelled && !c.finished() {
+		e.Status = "cancelled"
+	}
 	if e.Title == "" {
 		e.Title = "Tool"
 	}

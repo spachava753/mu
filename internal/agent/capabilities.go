@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 )
@@ -14,6 +15,9 @@ import (
 type capabilityWriter struct{ io.Writer }
 
 func (w capabilityWriter) Write(p []byte) (int, error) {
+	if !bytes.Contains(p, []byte(`"initialize"`)) {
+		return w.Writer.Write(p)
+	}
 	var frame struct {
 		Method string `json:"method"`
 	}

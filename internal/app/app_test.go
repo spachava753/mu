@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +31,19 @@ func openTest(t *testing.T, dir string) *App {
 }
 func findThread(t *testing.T, a *App, id string) ThreadView {
 	t.Helper()
+	// Every session change must invalidate the snapshot's cached deep copy.
+	a.mu.Lock()
+	for _, r := range a.runtimes {
+		if r.cloneVersion == r.sessionVersion {
+			cached, _ := json.Marshal(r.sessionClone)
+			live, _ := json.Marshal(r.Session.Clone())
+			if !bytes.Equal(cached, live) {
+				a.mu.Unlock()
+				t.Fatalf("snapshot session is stale:\ncached %s\nlive   %s", cached, live)
+			}
+		}
+	}
+	a.mu.Unlock()
 	for _, v := range a.Snapshot().Threads {
 		if v.ID == id {
 			return v

@@ -30,6 +30,7 @@ type Process struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr *tailBuffer
+	sdkLog *tailBuffer // SDK diagnostics, such as undecodable notifications
 	done   chan struct{}
 	closed chan struct{}
 	once   sync.Once
@@ -57,7 +58,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	cmd.Dir = cwd
 	prepareProcess(cmd)
 	cmd.WaitDelay = time.Second
-	p := &Process{cmd: cmd, hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}}
+	p := &Process{cmd: cmd, hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, sdkLog: &tailBuffer{limit: 4096}}
 	cmd.Stderr = p.stderr
 	p.stdin, err = cmd.StdinPipe()
 	if err != nil {
@@ -79,7 +80,7 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	}
 	_ = writer.Close()
 	p.Conn = acp.NewClientSideConnection(p, capabilityWriter{p.stdin}, p.stdout)
-	p.Conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.Conn.SetLogger(slog.New(slog.NewTextHandler(p.sdkLog, &slog.HandlerOptions{Level: slog.LevelError})))
 	go func() {
 		_ = cmd.Wait()
 		p.lifeMu.Lock()
@@ -123,24 +124,56 @@ func (p *Process) Error(err error) error {
 	if err == nil {
 		return nil
 	}
-	output := p.stderr.snapshot()
-	if strings.TrimSpace(output) != "" {
-		return fmt.Errorf("%w\nAgent stderr:\n%s", err, output)
+	if output := p.stderr.snapshot(); strings.TrimSpace(output) != "" {
+		err = fmt.Errorf("%w\nAgent stderr:\n%s", err, output)
+	}
+	if output := p.sdkLog.snapshot(); strings.TrimSpace(output) != "" {
+		err = fmt.Errorf("%w\nACP diagnostics:\n%s", err, output)
 	}
 	return err
 }
 
-func (p *Process) Close() {
+// Grace periods for an agent to exit after its input closes, and then after
+// SIGTERM, before it is killed. Agents own session history, so they get the
+// chance to persist it.
+const (
+	exitGrace      = 2 * time.Second
+	terminateGrace = time.Second
+)
+
+// Close ends the process gracefully: it closes the agent's input, then
+// requests termination, and kills it only if it is still running.
+func (p *Process) Close() { p.shutdown(true) }
+
+// kill ends an unresponsive process immediately.
+func (p *Process) kill() { p.shutdown(false) }
+
+func (p *Process) shutdown(graceful bool) {
 	p.once.Do(func() {
 		close(p.closed)
 		_ = p.stdin.Close()
-		p.lifeMu.Lock()
-		select {
-		case <-p.done:
-		default:
-			killProcess(p.cmd)
+		signal := func(send func(*exec.Cmd)) {
+			p.lifeMu.Lock()
+			defer p.lifeMu.Unlock()
+			select {
+			case <-p.done:
+			default:
+				send(p.cmd)
+			}
 		}
-		p.lifeMu.Unlock()
+		exited := func(grace time.Duration) bool {
+			select {
+			case <-p.done:
+				return true
+			case <-time.After(grace):
+				return false
+			}
+		}
+		if graceful && !exited(exitGrace) {
+			signal(terminateProcess)
+			exited(terminateGrace)
+		}
+		signal(killProcess)
 		_ = p.stdout.Close()
 		select {
 		case <-p.done:

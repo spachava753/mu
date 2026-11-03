@@ -94,22 +94,28 @@ type job struct {
 }
 type runtime struct {
 	Conversation
-	closing        chan struct{}
-	identity       [3]string
-	conn           *connection
-	session        string
-	job            *job
-	status, err    string
-	acceptUpdates  bool
-	pending        map[string]*pending
-	tools          map[string]*toolCall
-	epoch          uint64
-	initializing   bool
-	initialUpdates []acp.SessionNotification
-	configuring    bool
-	sessionError   string
-	configCancel   context.CancelFunc
-	echo           promptEcho
+	closing       chan struct{}
+	identity      [3]string
+	conn          *connection
+	session       string
+	job           *job
+	status, err   string
+	acceptUpdates bool
+	pending       map[string]*pending
+	tools         map[string]*toolCall
+	turnTools     map[string]bool // tool calls reported during the current turn
+	modeUpdates   uint64          // current_mode_update notifications received
+	// sessionVersion counts changes to Conversation.Session; Snapshot reuses
+	// its deep copy until the session changes again.
+	sessionVersion, cloneVersion uint64
+	sessionClone                 state.Session
+	epoch                        uint64
+	initializing                 bool
+	initialUpdates               []acp.SessionNotification
+	configuring                  bool
+	sessionError                 string
+	configCancel                 context.CancelFunc
+	echo                         promptEcho
 }
 
 // live reports whether the thread has an open session on a running process.
@@ -139,6 +145,7 @@ type App struct {
 	closingSessions   map[[3]string]chan struct{}
 	permissionSeq     uint64
 	connections       map[[2]string]*connection
+	stopping          map[[2]string]chan struct{} // closed once a configuration's stopped processes exit
 	catalog           Catalog
 	catalogCancel     context.CancelFunc
 	catalogGeneration uint64
@@ -147,8 +154,9 @@ type App struct {
 	// take before Mu terminates the agent process. Cancelling can involve
 	// finishing a tool call or other cleanup in the agent, so it is generous.
 	agentDeadline time.Duration
-	// discoveryTimeout bounds one discovery; tests shorten it.
-	discoveryTimeout time.Duration
+	// discoveryTimeout bounds one discovery and loadTimeout one session
+	// load or creation; tests shorten them.
+	discoveryTimeout, loadTimeout time.Duration
 }
 
 // AgentDeadline is how long Mu waits for an agent to end a cancelled turn or
@@ -162,7 +170,7 @@ func Open(dir, defaultWorkingDir string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -214,12 +222,15 @@ func (a *App) threadLocked(id string) *thread {
 func (a *App) runtimeLocked(id string) *runtime {
 	r := a.runtimes[id]
 	if r == nil {
-		r = &runtime{pending: map[string]*pending{}, tools: map[string]*toolCall{}}
+		r = &runtime{pending: map[string]*pending{}, tools: map[string]*toolCall{}, turnTools: map[string]bool{}, sessionVersion: 1}
 		a.runtimes[id] = r
 	}
 	return r
 }
 
+// Snapshot returns the state for the UI. Its values are read-only: nested SDK
+// session values are deep copies of the live state, shared between snapshots
+// until the session changes.
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -230,7 +241,10 @@ func (a *App) Snapshot() Snapshot {
 		if r := a.runtimes[t.ID]; r != nil {
 			v.Conversation = r.Conversation
 			v.Entries = slices.Clone(r.Entries)
-			v.Session = r.Session.Clone()
+			if r.cloneVersion != r.sessionVersion {
+				r.sessionClone, r.cloneVersion = r.Session.Clone(), r.sessionVersion
+			}
+			v.Session = r.sessionClone // A deep copy that no one modifies.
 			v.Status, v.Error = r.status, r.err
 			v.Connected = r.live()
 			v.Configuring, v.SessionError = r.configuring || r.closing != nil, r.sessionError
@@ -415,7 +429,7 @@ func (a *App) Send(id, text string) error {
 		return err
 	}
 	r.job, r.status, r.err, r.sessionError = j, "Connecting…", "", ""
-	r.echo = promptEcho{}
+	r.echo, r.turnTools = promptEcho{}, map[string]bool{}
 	a.notifyLocked()
 	config := *t.Thread
 	a.wg.Add(1)
@@ -437,14 +451,22 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	var result acp.PromptResponse
 	if err == nil {
 		a.mu.Lock()
-		r.status, r.acceptUpdates = "Working…", true
-		r.echo = promptEcho{target: text, local: local.ID}
-		sessionID := r.session
-		a.notifyLocked()
-		a.mu.Unlock()
-		result, err = p.Conn.Prompt(j.ctx, acp.PromptRequest{SessionId: acp.SessionId(sessionID), Prompt: []acp.ContentBlock{acp.TextBlock(text)}})
-		if err != nil {
-			err = p.Error(err)
+		if j.stopping {
+			// Stopped while connecting: the prompt is never sent. A Stop just
+			// after this check may write session/cancel before the SDK writes
+			// the prompt; the agent then ignores it, and Stop's deadline
+			// abandons the turn and closes the session.
+			a.mu.Unlock()
+		} else {
+			r.status, r.acceptUpdates = "Working…", true
+			r.echo = promptEcho{target: text, local: local.ID}
+			sessionID := r.session
+			a.notifyLocked()
+			a.mu.Unlock()
+			result, err = p.Conn.Prompt(j.ctx, acp.PromptRequest{SessionId: acp.SessionId(sessionID), Prompt: []acp.ContentBlock{acp.TextBlock(text)}})
+			if err != nil {
+				err = p.Error(err)
+			}
 		}
 	}
 	close(j.promptDone)
@@ -456,7 +478,6 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 		a.mu.Lock()
 	}
 	defer a.mu.Unlock()
-	r.acceptUpdates = err == nil
 	r.echo = promptEcho{}
 	r.status = ""
 	if current := a.threadLocked(t.ID); current != nil {
@@ -464,22 +485,51 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 		current.Session.TurnUsage = result.Usage
 		current.Session.StopReason = result.StopReason
 		storeMeta(&current.Session, "prompt", result.Meta)
+		r.sessionVersion++
 		if j.stopping || j.ctx.Err() != nil || result.StopReason == acp.StopReasonCancelled {
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: "Stopped. The response may be incomplete."})
 		} else if err != nil {
 			r.err = err.Error()
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: "Agent error: " + r.err})
-		} else if len(current.Entries) == before {
+		} else if text := stopReasonText(result.StopReason); text != "" {
+			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: text})
+		} else if result.StopReason == acp.StopReasonEndTurn && len(current.Entries) == before {
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: "The agent ended the turn without a response. Check its login, model configuration, and provider status before trying again."})
 		}
-		if err != nil && p != nil {
+		// An error response does not end the session. Detach only when the
+		// process is gone or Mu abandoned the request, as after Stop's deadline.
+		if err != nil && p != nil && (!p.Alive() || j.ctx.Err() != nil) {
 			a.detachLocked(r)
 		}
 		_ = a.saveLocked()
 	}
+	r.acceptUpdates = r.live()
 	r.job = nil
 	a.notifyLocked()
 }
+
+// stopReasonText explains a turn that ended for a reason other than the agent
+// finishing or being cancelled.
+func stopReasonText(reason acp.StopReason) string {
+	switch reason {
+	case acp.StopReasonRefusal:
+		// ACP: the prompt and everything after it are not included in the next prompt.
+		return "The agent refused this prompt. The prompt and everything after it will not be included in the agent's next prompt."
+	case acp.StopReasonMaxTokens:
+		return "The agent stopped because it reached its token limit."
+	case acp.StopReasonMaxTurnRequests:
+		return "The agent stopped because it reached its limit of model requests for this turn."
+	}
+	return ""
+}
+
+// Deadlines for connecting a thread. Starting and initializing the agent is
+// bounded separately from creating or loading the session, since a long
+// history can take much longer to replay.
+const (
+	startTimeout = 30 * time.Second
+	LoadTimeout  = 2 * time.Minute
+)
 
 // connect always loads saved sessions with replay. A cached transcript is not
 // proof of freshness: another client may have changed the agent's history.
@@ -513,12 +563,14 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	r.tools = map[string]*toolCall{}
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); r.initializing = false; r.initialUpdates = nil; a.mu.Unlock() }()
-	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	c, err := a.acquire(initCtx, t.AgentID, t.Command)
+	startCtx, cancelStart := context.WithTimeout(ctx, startTimeout)
+	c, err := a.acquire(startCtx, t.AgentID, t.Command)
+	cancelStart()
 	if err != nil {
 		return nil, err
 	}
+	initCtx, cancel := context.WithTimeout(ctx, a.loadTimeout)
+	defer cancel()
 	p := c.process
 	var sessionID string
 	var options []acp.SessionConfigOption
@@ -598,6 +650,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 				current.Session.Modes = modes
 			}
 			storeMeta(&current.Session, "setup", meta)
+			r.sessionVersion++
 			replay(r.initialUpdates[boundary:])
 			r.initializing, r.initialUpdates = false, nil
 			err = a.saveLocked()
@@ -606,8 +659,12 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	if err != nil {
 		// Only close an acknowledged active session. A missing-session error
 		// must not be obscured by a second error closing a nonexistent session.
+		// A load Mu abandoned may still complete in the agent, so it is closed
+		// too; an agent without it answers -32002, which counts as closed.
 		if acknowledged {
 			r.session = sessionID
+		} else if t.SessionID != "" && initCtx.Err() != nil {
+			r.session = t.SessionID
 		} else if t.SessionID != "" {
 			delete(c.routes, t.SessionID)
 		}
@@ -630,8 +687,17 @@ func (a *App) Stop(id string) {
 	j, session := r.job, r.session
 	j.stopping = true
 	// ACP requires every pending permission request of a cancelled turn to be
-	// answered as cancelled.
+	// answered as cancelled, and asks clients to mark the turn's unfinished
+	// tool calls as cancelled when they send session/cancel.
 	cancelPermissionsLocked(r)
+	if t := a.threadLocked(id); t != nil {
+		for toolID := range r.turnTools {
+			if call := r.tools[toolID]; call != nil && !call.finished() {
+				call.cancelled = true
+				renderTool(t, toolID, call)
+			}
+		}
+	}
 	r.status = "Stopping…"
 	a.notifyLocked()
 	if !r.live() {
@@ -644,19 +710,24 @@ func (a *App) Stop(id string) {
 	a.mu.Unlock()
 	go func() {
 		defer close(j.stopDone)
-		// The deadline covers dispatching the cancellation as well as the
-		// agent's response: the write itself can block on an unread pipe.
-		// Terminating an unresponsive agent ends every session it serves.
-		err := p.Bounded(deadline, func(ctx context.Context) error {
-			_ = p.Conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(session)})
-			select {
-			case <-j.promptDone:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		})
-		if err != nil {
+		// Only dispatching the cancellation needs a hard deadline: the write
+		// can block on an agent that stopped reading, and Bounded then
+		// terminates the process.
+		if err := p.Bounded(deadline, func(ctx context.Context) error {
+			return p.Conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(session)})
+		}); err != nil {
+			j.cancel()
+			return
+		}
+		timer := time.NewTimer(deadline)
+		defer timer.Stop()
+		select {
+		case <-j.promptDone:
+		case <-timer.C:
+			// The agent has not ended the turn. Abandon the prompt; run then
+			// closes the session, which ACP requires the agent to treat as a
+			// cancellation. Only an unanswered close terminates the process,
+			// so other sessions on it are unaffected.
 			j.cancel()
 		}
 	}()
@@ -719,9 +790,10 @@ func (a *App) Answer(id, permissionID string, option acp.PermissionOptionId) {
 }
 
 // Called with mu held. Unroute the session, then close it on its connection
-// and release the connection; the last thread to release a connection
+// and release the connection; the last user of a connection that is not kept
 // terminates its process. Reconnecting waits for this close barrier, and
-// shutdown joins the detached work.
+// starting a replacement process waits for the old one to exit (stopLocked).
+// Shutdown joins the detached work.
 func (a *App) detachLocked(r *runtime) {
 	c, session := r.conn, r.session
 	if c == nil {
@@ -744,7 +816,7 @@ func (a *App) detachLocked(r *runtime) {
 		defer a.wg.Done()
 		err := c.process.CloseSession(session, deadline)
 		a.mu.Lock()
-		p := a.releaseLocked(c)
+		a.releaseLocked(c) // A reconnect also waits for any process it stops.
 		if err != nil {
 			r.sessionError = err.Error()
 			a.shutdownErrors = append(a.shutdownErrors, err)
@@ -758,9 +830,6 @@ func (a *App) detachLocked(r *runtime) {
 		close(done)
 		a.notifyLocked()
 		a.mu.Unlock()
-		if p != nil {
-			p.Close()
-		}
 	}()
 }
 

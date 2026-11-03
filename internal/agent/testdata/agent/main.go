@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -113,6 +115,9 @@ func main() {
 		s := open[p.SessionID]
 		switch m.Method {
 		case "initialize":
+			if slices.Contains(os.Args, "slow-init") {
+				time.Sleep(500 * time.Millisecond)
+			}
 			// Mu offers no client file system or terminal methods.
 			if c := p.ClientCapabilities; c.Fs.Read || c.Fs.Write || c.Terminal {
 				reject(m.ID)
@@ -143,6 +148,12 @@ func main() {
 			}
 			listSaved(m.ID, p.Cursor)
 		case "session/close":
+			if slices.Contains(os.Args, "close-missing") {
+				// The agent no longer has the session: ACP's -32002.
+				delete(open, p.SessionID)
+				send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32002, "message": "Resource not found"}})
+				continue
+			}
 			if s == nil {
 				notOpen(m.ID, p.SessionID)
 				continue
@@ -191,6 +202,7 @@ func main() {
 				continue
 			}
 			if slices.Contains(os.Args, "wait-load") {
+				opened(saved) // Loaded, but the reply never comes.
 				continue
 			}
 			if slices.Contains(os.Args, "partial-load-fail") {
@@ -235,6 +247,9 @@ func main() {
 				continue
 			}
 			s.mode = p.ModeID
+			if slices.Contains(os.Args, "mode-fallback") {
+				s.mode = "ask" // The agent keeps another mode and says so before replying.
+			}
 			notify(s.ID, map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": s.mode})
 			reply(m.ID, map[string]any{})
 		case "session/prompt":
@@ -261,6 +276,30 @@ func main() {
 				finish(s, "end_turn")
 			case "wait", "hang":
 				s.waiting = text
+				update(session, "agent_message_chunk", "Waiting")
+			case "exit-slow":
+				// The transport ends before the process exits.
+				_ = os.Stdout.Close()
+				time.Sleep(500 * time.Millisecond)
+				logCall(message{Method: "exited"})
+				os.Exit(0)
+			case "prompt-error":
+				s.recording, s.pending = false, nil
+				send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32603, "message": "provider overloaded"}})
+			case "bad-update":
+				// An undecodable notification, then an error.
+				send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": 5}})
+				s.recording, s.pending = false, nil
+				send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32603, "message": "bad update sent"}})
+			case "refuse":
+				finish(s, "refusal")
+			case "max-tokens":
+				update(session, "agent_message_chunk", "Partial")
+				finish(s, "max_tokens")
+			case "tool-wait":
+				toolCall(session, map[string]any{"toolCallId": "tool-done", "title": "Read", "kind": "read", "status": "completed"})
+				toolCall(session, map[string]any{"toolCallId": "tool-run", "title": "Run", "kind": "execute", "status": "in_progress"})
+				s.waiting = "wait"
 				update(session, "agent_message_chunk", "Waiting")
 			case "permission-ref":
 				// The request names only a tool call reported earlier.
@@ -332,5 +371,16 @@ func main() {
 				send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32601, "message": "not implemented"}})
 			}
 		}
+	}
+	// Input closed: the client is shutting the agent down.
+	if slices.Contains(os.Args, "slow-exit") {
+		time.Sleep(300 * time.Millisecond) // Like persisting session state.
+		logCall(message{Method: "exited"})
+	}
+	if slices.Contains(os.Args, "ignore-eof") {
+		terminated := make(chan os.Signal, 1)
+		signal.Notify(terminated, syscall.SIGTERM)
+		<-terminated
+		logCall(message{Method: "terminated"})
 	}
 }

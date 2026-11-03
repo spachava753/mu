@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ func (p *Process) Bounded(timeout time.Duration, request func(context.Context) e
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		p.Close()
+		p.kill()
 		<-done
 		return fmt.Errorf("agent did not respond within %s and was terminated", timeout)
 	}
@@ -59,8 +60,16 @@ func (p *Process) CloseSession(session string, timeout time.Duration) error {
 		_, err := p.Conn.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(session)})
 		return err
 	})
+	// Closing is idempotent: -32002 means the agent no longer has the session.
+	var request *acp.RequestError
+	if errors.As(err, &request) && request.Code == sessionNotFound {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("close session %s: %w", session, p.Error(err))
 	}
 	return nil
 }
+
+// sessionNotFound is ACP's "resource not found" error code.
+const sessionNotFound = -32002

@@ -117,6 +117,16 @@ func TestQAConversation(t *testing.T) {
 	if !tt.HasText("Echo: after stop") {
 		t.Fatal("composer did not recover after Stop")
 	}
+
+	// Stop shows the turn's unfinished tool calls as cancelled.
+	typeMessage("tool-wait", true)
+	await(func(thread app.ThreadView) bool { return thread.Running && lastText(thread) == "Waiting" })
+	click("Stop")
+	await(func(thread app.ThreadView) bool { return !thread.Running })
+	if _, ok := tt.Find("cancelled"); !ok {
+		t.Fatal("stopped tool call is not shown as cancelled")
+	}
+	screenshot(t, tt, "stopped-tools-1100")
 }
 
 // This exercises actual headless widget hit testing, never desktop input.

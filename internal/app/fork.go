@@ -40,7 +40,8 @@ func (a *App) Fork(id string) (string, error) {
 	}
 	config, deadline := *source.Thread, a.agentDeadline
 	r := a.runtimeLocked(id)
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	// connect bounds connecting the source; the fork request has its own deadline.
+	ctx, cancel := context.WithCancel(context.Background())
 	r.configuring, r.configCancel, r.sessionError = true, cancel, ""
 	a.wg.Add(1)
 	a.notifyLocked()
@@ -70,7 +71,9 @@ func (a *App) Fork(id string) (string, error) {
 	if !live {
 		return fail(errors.New("the source session is no longer connected"))
 	}
-	result, err := p.Conn.UnstableForkSession(ctx, acp.UnstableForkSessionRequest{SessionId: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.UnstableMcpServer{}})
+	forkCtx, cancelFork := context.WithTimeout(ctx, 35*time.Second)
+	defer cancelFork()
+	result, err := p.Conn.UnstableForkSession(forkCtx, acp.UnstableForkSessionRequest{SessionId: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.UnstableMcpServer{}})
 	if err != nil {
 		return fail(fmt.Errorf("fork session: %w", p.Error(err)))
 	}

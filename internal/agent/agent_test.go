@@ -100,3 +100,27 @@ func TestStartupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Close gives the agent time to exit after its input closes, then asks it to
+// terminate, before killing it.
+func TestCloseIsGraceful(t *testing.T) {
+	command := testutil.Agent(t)
+	logged := func(method string) bool {
+		b, _ := os.ReadFile(filepath.Join(filepath.Dir(command), "fixture-sessions", "calls.jsonl"))
+		return strings.Contains(string(b), `"method":"`+method+`"`)
+	}
+	for _, c := range []struct{ arg, method string }{{"slow-exit", "exited"}, {"ignore-eof", "terminated"}} {
+		p, err := Start(context.Background(), command+" "+c.arg, t.TempDir(), Hooks{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		p.Close()
+		if !logged(c.method) {
+			t.Fatalf("%s: agent was killed before it could exit", c.arg)
+		}
+		if elapsed := time.Since(started); elapsed > exitGrace+terminateGrace+time.Second {
+			t.Fatalf("%s: close took %s", c.arg, elapsed)
+		}
+	}
+}
