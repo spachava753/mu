@@ -167,6 +167,9 @@ func main() {
 				time.Sleep(150 * time.Millisecond)
 				update(p.SessionID, "agent_message_chunk", "late close notification")
 			}
+			if slices.Contains(os.Args, "slower-close") {
+				time.Sleep(time.Second)
+			}
 			if slices.Contains(os.Args, "wait-close") {
 				continue
 			}

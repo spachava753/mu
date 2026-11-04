@@ -360,3 +360,202 @@ func TestRenameThreadUI(t *testing.T) {
 		})
 	}
 }
+
+func TestBulkThreadActionsUI(t *testing.T) {
+	for _, size := range [][2]int{{1100, 780}, {800, 600}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			a := testApp(t)
+			command := testutil.Agent(t)
+			for _, title := range []string{"One", "Two", "Three", "Four"} {
+				id, err := a.Create(command, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := a.Rename(id, title); err != nil {
+					t.Fatal(err)
+				}
+			}
+			view := desktop.New(a, "")
+			tt := ui.NewTester(view.Draw, size[0], size[1])
+			tt.Frame()
+			clickMods := func(mods ui.Modifiers, label string) {
+				t.Helper()
+				if err := tt.ClickWith(mods, label); err != nil {
+					t.Fatal(err)
+				}
+				tt.Frame()
+				tt.Advance(320 * time.Millisecond)
+			}
+			// Cmd+click marks, and shows the bar.
+			clickMods(ui.Cmd, "Thread: One")
+			clickMods(ui.Cmd, "Thread: Two")
+			if !tt.HasText("2 selected") {
+				t.Fatal("bulk bar did not show the count", tt.Texts())
+			}
+			screenshot(t, tt, fmt.Sprintf("bulk-selected-%d", size[0]))
+			// Escape clears; the Select button enters selection mode, where a
+			// plain click marks.
+			tt.Key(0, ui.KeyEscape)
+			tt.Frame()
+			tt.Advance(320 * time.Millisecond)
+			if tt.HasText("2 selected") {
+				t.Fatal("Escape kept the selection")
+			}
+			click(t, tt, "Select")
+			if !tt.HasText("0 selected") {
+				t.Fatal("Select did not show the bar", tt.Texts())
+			}
+			screenshot(t, tt, fmt.Sprintf("bulk-empty-%d", size[0]))
+			click(t, tt, "Thread: One")
+			click(t, tt, "Thread: Three")
+			// Archive acts on both, stays in the list, and clears the selection.
+			click(t, tt, "Archive")
+			waitView(t, a, tt, func(s app.Snapshot) bool {
+				n := 0
+				for _, th := range s.Threads {
+					if th.Archived && !th.Configuring {
+						n++
+					}
+				}
+				return n == 2
+			})
+			if tt.HasText("2 selected") {
+				t.Fatal("selection survived the action", tt.Texts())
+			}
+			if _, ok := tt.Find("Thread: Two"); !ok {
+				t.Fatal("left the active list")
+			}
+			// Remove asks first, in the plural, and Keep changes nothing.
+			clickMods(ui.Cmd, "Thread: Two")
+			clickMods(ui.Cmd, "Thread: Four")
+			click(t, tt, "Remove")
+			if !tt.HasText("Remove 2 threads from Mu?") {
+				t.Fatal("no bulk confirmation", tt.Texts())
+			}
+			screenshot(t, tt, fmt.Sprintf("bulk-remove-%d", size[0]))
+			click(t, tt, "Keep threads")
+			if n := len(a.Snapshot().Threads); n != 4 {
+				t.Fatalf("Keep removed threads: %d", n)
+			}
+			click(t, tt, "Remove")
+			click(t, tt, "Remove references")
+			waitView(t, a, tt, func(s app.Snapshot) bool { return len(s.Threads) == 2 })
+			if tt.HasText("2 selected") {
+				t.Fatal("selection survived removal")
+			}
+			// In the archived list, the action restores.
+			click(t, tt, "Show archived")
+			clickMods(ui.Cmd, "Thread: One")
+			clickMods(ui.Cmd, "Thread: Three")
+			if _, ok := tt.Find("Restore"); !ok {
+				t.Fatal("no Restore in the archived list", tt.Texts())
+			}
+			click(t, tt, "Restore")
+			waitView(t, a, tt, func(s app.Snapshot) bool {
+				for _, th := range s.Threads {
+					if th.Archived {
+						return false
+					}
+				}
+				return true
+			})
+		})
+	}
+}
+
+// A thread restored from the bulk bar while it is open loads again.
+func TestBulkRestoreLoadsOpenThread(t *testing.T) {
+	a := testApp(t)
+	id, err := a.Create(testutil.Agent(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Rename(id, "Open"); err != nil {
+		t.Fatal(err)
+	}
+	view := desktop.New(a, "")
+	tt := ui.NewTester(view.Draw, 1100, 780)
+	tt.Frame()
+	if err := a.Send(id, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && s.Threads[0].Connected })
+	click(t, tt, "Archive") // From the header: keeps it open, in the archived list.
+	waitView(t, a, tt, func(s app.Snapshot) bool {
+		return s.Threads[0].Archived && !s.Threads[0].Connected && !s.Threads[0].Configuring
+	})
+	if err := tt.ClickWith(ui.Cmd, "Thread: Open"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	if err := tt.Click("Restore"); err != nil {
+		t.Fatal(err)
+	}
+	waitView(t, a, tt, func(s app.Snapshot) bool {
+		return !s.Threads[0].Archived && s.Threads[0].Connected && !s.Threads[0].Configuring
+	})
+}
+
+// Threads a bulk restore skipped stay marked and listed, even when the open
+// thread was restored.
+func TestPartialBulkRestoreKeepsSkippedThreads(t *testing.T) {
+	a := testApp(t)
+	command := testutil.Agent(t)
+	open, err := a.Create(command, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, err := a.Create(command+" slower-close", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, title := range map[string]string{open: "Open", busy: "Busy"} {
+		if err := a.Rename(id, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view := desktop.New(a, "")
+	tt := ui.NewTester(view.Draw, 1100, 780)
+	tt.Frame()
+	if err := a.Connect(busy); err != nil {
+		t.Fatal(err)
+	}
+	find := func(s app.Snapshot, id string) app.ThreadView {
+		for _, th := range s.Threads {
+			if th.ID == id {
+				return th
+			}
+		}
+		t.Fatalf("thread %s not found", id)
+		return app.ThreadView{}
+	}
+	waitView(t, a, tt, func(s app.Snapshot) bool { return find(s, busy).Connected })
+	click(t, tt, "Thread: Open")
+	click(t, tt, "Archive") // From the header: stays open, in the archived list.
+	waitView(t, a, tt, func(s app.Snapshot) bool { return find(s, open).Archived && !find(s, open).Configuring })
+	// Archiving starts a close of Busy that stays outstanding for a second.
+	if _, err := a.ArchiveThreads([]string{busy}, true); err != nil {
+		t.Fatal(err)
+	}
+	waitView(t, a, tt, func(s app.Snapshot) bool { return find(s, busy).Configuring })
+	for _, label := range []string{"Thread: Open", "Thread: Busy"} {
+		if err := tt.ClickWith(ui.Cmd, label); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+	}
+	if err := tt.Click("Restore"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	s := a.Snapshot()
+	if find(s, open).Archived || !find(s, busy).Archived {
+		t.Fatal("expected Open restored and Busy skipped")
+	}
+	if !tt.HasText("1 selected") || !tt.HasText("Archived") {
+		t.Fatal("skipped thread was not kept for retry", tt.Texts())
+	}
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !find(s, busy).Configuring })
+}

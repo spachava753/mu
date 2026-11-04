@@ -3,6 +3,7 @@ package desktop
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -22,7 +23,8 @@ type View struct {
 	creating, archived, deleting         bool
 	settingsOpen, sessionOpen, usageOpen bool
 	picker                               commandPicker
-	deleteID                             string
+	deleteIDs                            []string
+	selection                            threadSelection
 	renaming, renameFresh                bool
 	renameID, renameTitle, renameError   string
 	command, agentID, workDir, projectID string
@@ -131,7 +133,70 @@ func (v *View) archive(t app.ThreadView) {
 		}
 	}
 }
-func (v *View) confirmRemove(id string) { v.deleteID, v.deleting = id, true }
+func (v *View) confirmRemove(ids ...string) { v.deleteIDs, v.deleting = ids, true }
+
+// bulkArchive archives or restores the marked threads. Threads it could not
+// change stay marked, and say why.
+func (v *View) bulkArchive(order []string) {
+	result, err := v.app.ArchiveThreads(v.selection.ids(order), !v.archived)
+	if err != nil {
+		v.fail(err)
+		return
+	}
+	if slices.Contains(result.Changed, v.selected) {
+		if v.archived {
+			// Restored while open: load it and, as a single Restore does, list
+			// it, unless threads left to retry are in this list.
+			v.archived = len(result.Skipped) > 0
+			v.loadSelected()
+		} else {
+			v.selected = ""
+		}
+	}
+	v.finishBulk(result)
+}
+
+// removeThreads removes the confirmed threads from Mu.
+func (v *View) removeThreads() {
+	result, err := v.app.DeleteThreads(v.deleteIDs)
+	v.deleting = false
+	if err != nil {
+		v.fail(err)
+		return
+	}
+	for _, id := range result.Changed {
+		if v.selected == id {
+			v.selected = ""
+		}
+		delete(v.drafts, id)
+		delete(v.lists, id)
+	}
+	v.finishBulk(result)
+}
+
+func (v *View) finishBulk(result app.BulkResult) {
+	if len(result.Skipped) > 0 {
+		v.selection.keep(result.Skipped)
+		v.err = bulkSkippedText(len(result.Skipped))
+		return
+	}
+	v.err = ""
+	v.selection.clear()
+}
+
+// bulkSkippedText explains threads a bulk action left unchanged.
+func bulkSkippedText(n int) string {
+	if n == 1 {
+		return "1 thread is busy and was not changed. Stop its turn or wait for its session request, then try again."
+	}
+	return itoa(n) + " threads are busy and were not changed. Stop their turns or wait for their session requests, then try again."
+}
+
+// endSelection leaves selection mode, with any message about it.
+func (v *View) endSelection() {
+	v.selection.clear()
+	v.err = ""
+}
 func (v *View) fork(id string) {
 	result := make(chan forkResult, 1)
 	v.forkResult = result
@@ -159,6 +224,9 @@ func (v *View) Draw(c *ui.Context) {
 		}
 	}
 	matte(c)
+	if v.selection.active() && !v.deleting && !v.renaming {
+		c.OnShortcut(0, ui.KeyEscape, v.endSelection)
+	}
 	v.md.Theme = markdownTheme(c.Theme())
 	// Keep the overlay parent alive so first-open and last-close transitions
 	// can animate. An empty layer draws nothing and takes no input.
@@ -215,23 +283,15 @@ func (v *View) Draw(c *ui.Context) {
 		})
 	})
 	modal(c, &v.deleting, func() {
-		ui.Text(c, "Remove this thread from Mu?").FontSize(14).FontWeight(500)
-		ui.Text(c, "This removes only Mu’s session reference. The agent’s history and workspace files are unchanged. You can import the session again.").FontSize(13).TextColor(c.Theme().TextMuted).MaxWidth(420)
+		title, body, keep, remove := "Remove this thread from Mu?", "This removes only Mu’s session reference. The agent’s history and workspace files are unchanged. You can import the session again.", "Keep thread", "Remove reference"
+		if n := len(v.deleteIDs); n > 1 {
+			title, body, keep, remove = "Remove "+itoa(n)+" threads from Mu?", "This removes only Mu’s session references. The agents’ histories and workspace files are unchanged. You can import the sessions again.", "Keep threads", "Remove references"
+		}
+		ui.Text(c, title).FontSize(14).FontWeight(500)
+		ui.Text(c, body).FontSize(13).TextColor(c.Theme().TextMuted).MaxWidth(420)
 		ui.Row(c).Gap(8).Justify(ui.End).Margin(6, 0, 0, 0).Children(func() {
-			ui.Button(c, "Keep thread").OnClick(func() { v.deleting = false })
-			ui.Button(c, "Remove reference").TextColor(c.Theme().Danger).OnClick(func() {
-				if err := v.app.Delete(v.deleteID); err != nil {
-					v.fail(err)
-					v.deleting = false
-					return
-				}
-				if v.selected == v.deleteID {
-					v.selected = ""
-				}
-				delete(v.drafts, v.deleteID)
-				delete(v.lists, v.deleteID)
-				v.deleting = false
-			})
+			ui.Button(c, keep).OnClick(func() { v.deleting = false })
+			ui.Button(c, remove).TextColor(c.Theme().Danger).OnClick(v.removeThreads)
 		})
 	})
 	v.sessionDialog(c, s)
@@ -248,7 +308,10 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 	sidebar := ui.Column(c.Key("sidebar")).Label("Thread sidebar").Shrink(0).ClipX()
 	width := sidebar.AnimateTo("width", target, sidebarMotion)
 	sidebar.Width(width).Children(func() {
-		toggle := func() { v.fail(v.app.SetSidebarCollapsed(!s.SidebarCollapsed)) }
+		toggle := func() {
+			v.selection.clear() // The rail has no way to show or act on it.
+			v.fail(v.app.SetSidebarCollapsed(!s.SidebarCollapsed))
+		}
 		if s.SidebarCollapsed {
 			ui.Column(c.Key("rail")).Width(railWidth-1).Grow(1).AlignItems(ui.Center).Padding(10, 0).Gap(4).Transition(fadeMotion).Children(func() {
 				iconButton(c, "Expand sidebar", panelIcon).OnClick(toggle)
@@ -266,27 +329,32 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 				iconButton(c, "New thread", plusIcon).OnClick(v.openNew)
 				iconButton(c, "Collapse sidebar", panelIcon).OnClick(toggle)
 			})
-			count := 0
-			for _, thread := range s.Threads {
-				if thread.Archived == v.archived {
-					count++
-				}
-			}
-			ui.Row(c).Shrink(0).Padding(6, 10, 4, 18).Gap(6).Children(func() {
+			groups := groupThreads(s, v.archived)
+			order := threadOrder(groups)
+			v.selection.retain(order)
+			count := len(order)
+			ui.Row(c).Shrink(0).Padding(6, 10, 4, 18).Gap(4).Children(func() {
 				label := "Threads"
 				if v.archived {
 					label = "Archived"
 				}
-				ui.Text(c, label).FontSize(12).FontWeight(500).TextColor(faint(t)).SingleLine()
-				ui.Text(c, itoa(count)).FontSize(12).TextColor(faint(t)).Grow(1)
-				toggle := "Show archived"
-				if v.archived {
-					toggle = "Show active"
+				ui.Text(c, label).FontSize(12).FontWeight(500).TextColor(faint(t)).SingleLine().Shrink(0)
+				ui.Text(c, itoa(count)).FontSize(12).TextColor(faint(t)).SingleLine().Grow(1)
+				if v.selection.active() {
+					quietButton(c.Key("selection-done"), "Done").OnClick(v.endSelection)
+					return
 				}
-				quietButton(c, toggle).OnClick(func() { v.archived = !v.archived })
+				if count > 0 {
+					quietButton(c.Key("selection-start"), "Select").OnClick(func() { v.selection.mode = true })
+				}
+				text, name := "Archived", "Show archived"
+				if v.archived {
+					text, name = "Active", "Show active"
+				}
+				quietAction(c.Key("archive-toggle"), text, name, false).Tooltip(name).OnClick(func() { v.archived = !v.archived })
 			})
 			ui.Scroll(c).Grow(1).MinHeight(0).Gap(1).Padding(2, 10, 8, 10).Children(func() {
-				v.threadGroups(c, s)
+				v.threadGroups(c, s, groups, order)
 				if count == 0 {
 					text := "No threads yet."
 					if v.archived {
@@ -295,6 +363,9 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 					ui.Text(c, text).Padding(8).FontSize(12).TextColor(t.TextMuted)
 				}
 			})
+			if v.selection.active() {
+				v.bulkBar(c, order)
+			}
 			ui.Column(c).Shrink(0).Padding(6, 10, 10, 10).Gap(1).Children(func() {
 				navRow(c, "Import sessions", importIcon, v.importOpen).OnClick(v.openImports)
 				navRow(c, "Settings", gearIcon, v.settingsOpen).OnClick(v.openSettings)
@@ -303,32 +374,14 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 	})
 }
 
-// threadGroups lists the visible threads, grouped by project once any
-// project exists. Threads without a project come last.
-func (v *View) threadGroups(c *ui.Context, s app.Snapshot) {
-	visible := func(thread app.ThreadView) bool { return thread.Archived == v.archived }
-	group := func(id, name string) {
-		header := false
-		for _, thread := range s.Threads {
-			if !visible(thread) || thread.ProjectID != id {
-				continue
-			}
-			if !header && len(s.Projects) > 0 {
-				header = true
-				ui.Text(c.Key("group-"+id), name).Padding(10, 8, 3, 8).FontSize(11.5).FontWeight(500).TextColor(faint(c.Theme())).SingleLine()
-			}
-			v.threadRow(c, s, thread)
+// threadGroups lists the visible threads under their sections.
+func (v *View) threadGroups(c *ui.Context, s app.Snapshot, groups []threadGroup, order []string) {
+	for _, group := range groups {
+		if group.Name != "" {
+			ui.Text(c.Key("group-"+group.Key), group.Name).Padding(10, 8, 3, 8).FontSize(11.5).FontWeight(500).TextColor(faint(c.Theme())).SingleLine()
 		}
-	}
-	known := map[string]bool{}
-	for _, p := range s.Projects {
-		known[p.ID] = true
-		group(p.ID, p.Name)
-	}
-	group("", "No project")
-	for _, thread := range s.Threads {
-		if visible(thread) && thread.ProjectID != "" && !known[thread.ProjectID] {
-			v.threadRow(c, s, thread) // Not expected: removal clears the project.
+		for _, thread := range group.Threads {
+			v.threadRow(c, s, thread, order)
 		}
 	}
 }
@@ -355,13 +408,48 @@ func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 	return "", ui.Transparent
 }
 
-func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
+// bulkBar acts on the marked threads, above the sidebar's destinations.
+func (v *View) bulkBar(c *ui.Context, order []string) {
+	t := c.Theme()
+	n := v.selection.count()
+	ui.Row(c.Key("bulk-bar")).Shrink(0).Margin(0, 10).Padding(4, 2, 4, 8).Radius(6).Border(1, hairline(t)).Background(t.Surface).Transition(fadeMotion).Children(func() {
+		ui.Text(c, itoa(n)+" selected").FontSize(12).FontWeight(500).TextColor(t.TextMuted).SingleLine().Grow(1).MinWidth(0)
+		archive := "Archive"
+		if v.archived {
+			archive = "Restore"
+		}
+		quietAction(c, archive, archive, n == 0).OnClick(func() { v.bulkArchive(order) })
+		quietAction(c, "Remove", "Remove", n == 0).OnClick(func() { v.confirmRemove(v.selection.ids(order)...) })
+	})
+}
+
+func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView, order []string) {
 	t := c.Theme()
 	selected := thread.ID == v.selected && !v.creating && !v.settingsOpen && !v.importOpen
+	marked := v.selection.has(thread.ID)
 	button := ui.ButtonBase(c.Key(thread.ID)).Transition(colorMotion).Label("Thread: "+thread.Title).Padding(6, 8).Radius(5).FillWidth()
-	button.Background(sideColor(t, selected, button.Hovered()))
+	if v.selection.active() {
+		button.Checked(marked)
+	}
+	if marked {
+		button.Background(markedColor(t, button.Hovered()))
+	} else {
+		button.Background(sideColor(t, selected, button.Hovered()))
+	}
+	if v.selection.reveal == thread.ID {
+		button.ScrollIntoView() // The bar may have just taken room from the list.
+		v.selection.reveal = ""
+	}
 	busy := thread.Running || thread.Configuring
 	button.Children(func() {
+		if v.selection.active() {
+			box := ui.Box(c).Size(14, 14).Radius(4).Shrink(0).Center().Margin(0, 8, 0, 0)
+			if marked {
+				box.Background(t.Accent).Children(func() { ui.Icon(c, checkIcon).Size(11, 11).TextColor(t.AccentText) })
+			} else {
+				box.Border(1, t.TextMuted.Alpha(0.55))
+			}
+		}
 		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
 			status, color := threadStatus(t, thread)
 			ui.Row(c).Gap(6).Children(func() {
@@ -392,7 +480,27 @@ func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 				text.TextColor(color)
 			}
 		})
-	}).OnClick(func() { v.selectThread(thread.ID) }).ContextMenu(func(m *ui.Menu) {
+	}).OnClick(func() {
+		if v.selection.click(order, thread.ID, v.selected, button.ClickModifiers()) {
+			v.selectThread(thread.ID)
+		}
+	}).ContextMenu(func(m *ui.Menu) {
+		// A row in a selection of several acts on all of them.
+		if marked && v.selection.count() > 1 {
+			n := itoa(v.selection.count())
+			archive := "Archive "
+			if v.archived {
+				archive = "Restore "
+			}
+			if m.Item(archive + n + " threads").Chosen() {
+				v.bulkArchive(order)
+			}
+			m.Separator()
+			if m.Item("Remove " + n + " threads from Mu…").Chosen() {
+				v.confirmRemove(v.selection.ids(order)...)
+			}
+			return
+		}
 		if m.Item("Rename…").Chosen() {
 			v.openRename(thread)
 		}

@@ -157,15 +157,22 @@ func navRow(c *ui.Context, label string, icon *ui.SVG, active bool) ui.Element {
 }
 
 // quietButton is a compact text button without a border.
-func quietButton(c *ui.Context, text string) ui.Element {
+func quietButton(c *ui.Context, text string) ui.Element { return quietAction(c, text, text, false) }
+
+// quietAction is a quietButton whose accessible label can say more than its
+// text, for when the row around it is short of room.
+func quietAction(c *ui.Context, text, label string, disabled bool) ui.Element {
 	t := c.Theme()
-	b := ui.ButtonBase(c).Transition(colorMotion).Label(text).Padding(3, 7).Radius(5).Shrink(0)
-	label := t.TextMuted
-	if b.Hovered() {
+	b := ui.ButtonBase(c).Transition(colorMotion).Label(label).Padding(3, 7).Radius(5).Shrink(0).Disabled(disabled)
+	color := t.TextMuted
+	switch {
+	case disabled:
+		color = faint(t)
+	case b.Hovered():
 		b.Background(t.Text.Alpha(0.06))
-		label = t.Text
+		color = t.Text
 	}
-	b.Children(func() { ui.Text(c, text).FontSize(12).FontWeight(500).TextColor(label).SingleLine() })
+	b.Children(func() { ui.Text(c, text).FontSize(12).FontWeight(500).TextColor(color).SingleLine() })
 	return b
 }
 
@@ -181,6 +188,15 @@ func sideColor(t *ui.Theme, selected, hovered bool) ui.Color {
 		return t.Text.Alpha(0.045)
 	}
 	return ui.Transparent
+}
+
+// markedColor is the background of a sidebar row marked for a bulk action,
+// distinct from the open thread's neutral layer.
+func markedColor(t *ui.Theme, hovered bool) ui.Color {
+	if hovered {
+		return t.Accent.Alpha(0.24)
+	}
+	return t.Accent.Alpha(0.17)
 }
 
 // rowColor is the background of a row inside the content panel.
