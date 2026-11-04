@@ -172,7 +172,7 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 		r.modeUpdates++
 		sessionChanged = true
 	case acp.SessionUpdateTypeSessionInfoUpdate:
-		if u.Title != nil && strings.TrimSpace(*u.Title) != "" && *u.Title != t.Title {
+		if u.Title != nil && strings.TrimSpace(*u.Title) != "" && *u.Title != t.Title && !t.Renamed {
 			t.Title = *u.Title
 			a.dirty = true // The title is the only persisted field an update changes.
 		}

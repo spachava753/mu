@@ -94,6 +94,7 @@ func main() {
 			ConfigID              string          `json:"configId"`
 			Value                 json.RawMessage `json:"value"`
 			ModeID                string          `json:"modeId"`
+			Title                 string          `json:"title"`
 			ClientCapabilities    struct {
 				Fs struct {
 					Read  bool `json:"readTextFile"`
@@ -128,7 +129,7 @@ func main() {
 				continue
 			}
 			caps := map[string]any{}
-			for _, name := range []string{"list", "close", "fork", "additionalDirectories"} {
+			for _, name := range []string{"list", "close", "fork", "additionalDirectories", "title"} {
 				if !slices.Contains(os.Args, "no-"+name) {
 					caps[name] = map[string]any{}
 				}
@@ -175,6 +176,29 @@ func main() {
 			}
 			finish(s, "cancelled")
 			reply(m.ID, map[string]any{})
+		case "session/set_title":
+			// Works on any listed session, open on this connection or not.
+			saved, err := load(p.SessionID)
+			if err != nil {
+				send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32002, "message": "Resource not found"}})
+				continue
+			}
+			if slices.Contains(os.Args, "wait-title") {
+				continue
+			}
+			if slices.Contains(os.Args, "slow-title") {
+				time.Sleep(200 * time.Millisecond)
+			}
+			if slices.Contains(os.Args, "title-error") && strings.HasPrefix(p.Title, "Refused") {
+				reject(m.ID)
+				continue
+			}
+			saved.Title = strings.TrimSpace(p.Title)
+			if s != nil {
+				s.Title = saved.Title
+			}
+			save(saved)
+			reply(m.ID, map[string]any{"title": saved.Title})
 		case "session/fork":
 			if slices.Contains(os.Args, "slow-fork") {
 				time.Sleep(500 * time.Millisecond)

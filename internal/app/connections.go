@@ -226,29 +226,14 @@ func awaitCreation[T any](a *App, c *connection, timeout time.Duration, request 
 		value T
 		err   error
 	}
-	done, finished := make(chan outcome, 1), make(chan struct{})
-	a.wg.Add(2)
+	done := make(chan outcome, 1)
+	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
+		finished := a.unblockAtShutdown(c)
 		value, err := request(a.ctx)
-		close(finished)
+		finished()
 		done <- outcome{value, err}
-	}()
-	go func() {
-		defer a.wg.Done()
-		select {
-		case <-finished:
-		case <-a.ctx.Done():
-			// A context cannot interrupt a blocked pipe write; closing the
-			// process does, so shutdown can join this request.
-			timer := time.NewTimer(deadline)
-			defer timer.Stop()
-			select {
-			case <-finished:
-			case <-timer.C:
-				c.process.Close()
-			}
-		}
 	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -315,6 +300,33 @@ func (a *App) awaitSessionClosedLocked(ctx context.Context, identity [3]string) 
 		a.mu.Lock()
 	}
 	return nil
+}
+
+// unblockAtShutdown guards a request under the app's context. A context cannot
+// interrupt a blocked pipe write, so if the request is still outstanding an
+// agent deadline after the app starts closing, its process is closed, which
+// lets shutdown join the request. Call the returned function when it returns.
+func (a *App) unblockAtShutdown(c *connection) (finished func()) {
+	done := make(chan struct{})
+	a.mu.Lock()
+	deadline := a.agentDeadline
+	a.mu.Unlock()
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		select {
+		case <-done:
+		case <-a.ctx.Done():
+			timer := time.NewTimer(deadline)
+			defer timer.Stop()
+			select {
+			case <-done:
+			case <-timer.C:
+				c.process.Close()
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // keepLocked reports whether an idle connection keeps running. A saved agent's

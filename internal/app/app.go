@@ -58,6 +58,7 @@ type ThreadView struct {
 	Conversation
 	Status       string
 	Error        string
+	TitleError   string // the agent did not store the user's title
 	Permissions  []Permission
 	Connected    bool
 	Configuring  bool
@@ -114,6 +115,9 @@ type runtime struct {
 	initialUpdates               []acp.SessionNotification
 	configuring                  bool
 	sessionError                 string
+	titleError                   string
+	titleGeneration              uint64 // counts the user's renames
+	titleSyncing                 bool   // a worker is storing titles with the agent
 	configCancel                 context.CancelFunc
 	echo                         promptEcho
 }
@@ -252,7 +256,7 @@ func (a *App) Snapshot() Snapshot {
 				r.sessionClone, r.cloneVersion = r.Session.Clone(), r.sessionVersion
 			}
 			v.Session = r.sessionClone // A deep copy that no one modifies.
-			v.Status, v.Error = r.status, r.err
+			v.Status, v.Error, v.TitleError = r.status, r.err, r.titleError
 			v.Connected = r.live()
 			v.Configuring, v.SessionError = r.configuring || r.closing != nil, r.sessionError
 			pending := slices.SortedFunc(maps.Values(r.pending), func(a, b *pending) int { return cmp.Compare(a.seq, b.seq) })
@@ -421,7 +425,7 @@ func (a *App) Send(id, text string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	j := &job{ctx: ctx, cancel: cancel, done: make(chan struct{}), promptDone: make(chan struct{})}
 	before := *t.Thread
-	if t.Title == "New thread" {
+	if t.Title == "New thread" && !t.Renamed {
 		title := []rune(strings.Join(strings.Fields(text), " "))
 		if len(title) > 60 {
 			title = append(title[:59], '…')

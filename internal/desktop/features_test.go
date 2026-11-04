@@ -297,3 +297,66 @@ func projectsUI(t *testing.T, width, height int) {
 		t.Fatal("project removal changed threads", s)
 	}
 }
+
+func TestRenameThreadUI(t *testing.T) {
+	for _, size := range [][2]int{{1100, 780}, {800, 600}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			a := testApp(t)
+			if _, err := a.Create(testutil.Agent(t), ""); err != nil {
+				t.Fatal(err)
+			}
+			view := desktop.New(a, "")
+			tt := ui.NewTester(view.Draw, size[0], size[1])
+			tt.Frame()
+			// From the thread's header menu.
+			click(t, tt, "More thread actions")
+			if err := tt.ChooseMenuItem("Rename…"); err != nil {
+				t.Fatal(err)
+			}
+			tt.Frame()
+			tt.Advance(320 * time.Millisecond)
+			if !tt.HasText("Rename thread") {
+				t.Fatal("rename dialog did not open")
+			}
+			screenshot(t, tt, fmt.Sprintf("rename-dialog-%d", size[0]))
+			tt.Type("New thread two") // Replaces the selected title.
+			tt.Key(0, ui.KeyEnter)
+			tt.Frame()
+			tt.Advance(320 * time.Millisecond)
+			if got := a.Snapshot().Threads[0].Title; got != "New thread two" {
+				t.Fatalf("title after Enter: %q", got)
+			}
+			if _, open := tt.Find("Rename"); open {
+				t.Fatal("rename dialog stayed open")
+			}
+			// From the sidebar row's context menu, with Cancel leaving it alone.
+			if err := tt.RightClick("Thread: New thread two"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.ChooseMenuItem("Rename…"); err != nil {
+				t.Fatal(err)
+			}
+			tt.Frame()
+			tt.Advance(320 * time.Millisecond)
+			tt.Type(" ignored")
+			tt.Frame()
+			click(t, tt, "Cancel")
+			if got := a.Snapshot().Threads[0].Title; got != "New thread two" {
+				t.Fatalf("cancel changed the title: %q", got)
+			}
+			// A double click on the header's title opens it too.
+			r, ok := tt.Find("Current thread title")
+			if !ok {
+				t.Fatal("title not visible")
+			}
+			for range 2 {
+				tt.ClickAt(r.X+r.W/2, r.Y+r.H/2)
+			}
+			tt.Frame()
+			tt.Advance(320 * time.Millisecond)
+			if !tt.HasText("Rename thread") {
+				t.Fatal("double click did not open the dialog")
+			}
+		})
+	}
+}

@@ -30,6 +30,7 @@ type Entry struct {
 type Thread struct {
 	ID                    string    `json:"id"`
 	Title                 string    `json:"title"`
+	Renamed               bool      `json:"renamed,omitempty"` // the user chose the title
 	Command               string    `json:"command"`
 	AgentID               string    `json:"agentId,omitempty"`
 	AgentName             string    `json:"agentName,omitempty"`

@@ -103,7 +103,7 @@ func (a *App) Discover(agentID string) error {
 				if !slices.Equal(s.AdditionalDirectories, t.AdditionalDirectories) {
 					r.Notice = "The agent lists different additional directories for this session. Mu still loads it with the directories accepted at import."
 				}
-				if s.Title != "" {
+				if s.Title != "" && !t.Renamed {
 					t.Title = s.Title
 				}
 				if updated, err := time.Parse(time.RFC3339Nano, s.UpdatedAt); err == nil {

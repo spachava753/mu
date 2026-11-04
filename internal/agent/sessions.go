@@ -82,6 +82,13 @@ func (p *Process) CloseSession(session string, timeout time.Duration) error {
 // sessionNotFound is ACP's "resource not found" error code.
 const sessionNotFound = -32002
 
+// SessionTitles reports whether the agent stores titles set with
+// session/set_title.
+func (p *Process) SessionTitles() bool {
+	c := p.Info.AgentCapabilities
+	return c != nil && c.SessionCapabilities != nil && c.SessionCapabilities.Title != nil
+}
+
 // AdditionalDirectories reports whether the agent accepts additional
 // workspace directories for its sessions.
 func (p *Process) AdditionalDirectories() bool {

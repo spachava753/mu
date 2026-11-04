@@ -23,6 +23,8 @@ type View struct {
 	settingsOpen, sessionOpen, usageOpen bool
 	picker                               commandPicker
 	deleteID                             string
+	renaming, renameFresh                bool
+	renameID, renameTitle, renameError   string
 	command, agentID, workDir, projectID string
 	editProject                          state.Project
 	projectNotice                        string
@@ -233,6 +235,7 @@ func (v *View) Draw(c *ui.Context) {
 		})
 	})
 	v.sessionDialog(c, s)
+	v.renameDialog(c)
 	v.removeAgentDialog(c)
 }
 
@@ -346,6 +349,8 @@ func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 			status = "Working…"
 		}
 		return status, t.Accent
+	case thread.TitleError != "":
+		return "Title not stored", warnColor(t)
 	}
 	return "", ui.Transparent
 }
@@ -388,6 +393,9 @@ func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 			}
 		})
 	}).OnClick(func() { v.selectThread(thread.ID) }).ContextMenu(func(m *ui.Menu) {
+		if m.Item("Rename…").Chosen() {
+			v.openRename(thread)
+		}
 		label := "Archive"
 		if thread.Archived {
 			label = "Restore"
@@ -498,7 +506,10 @@ func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 	ui.Row(c).Height(44).Shrink(0).Padding(0, 10, 0, 20).Gap(2).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).Children(func() {
 		ui.Row(c).Grow(1).MinWidth(0).Gap(8).Margin(0, 8, 0, 0).Children(func() {
 			// The title keeps priority; agent and path truncate first.
-			ui.Text(c, thread.Title).FontSize(13).FontWeight(500).SingleLine().Shrink(0).MaxWidthPercent(70)
+			title := ui.Text(c.Key("thread-title"), thread.Title).FontSize(13).FontWeight(500).SingleLine().Shrink(0).MaxWidthPercent(70).Label("Current thread title").Tooltip(thread.Title + "\nDouble-click to rename")
+			if title.DoubleClicked() {
+				v.openRename(thread)
+			}
 			if thread.Archived {
 				chip(c, "Archived", t.TextMuted)
 			}
@@ -518,6 +529,9 @@ func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 		}
 		iconAction(c, archive, icon, busy).OnClick(func() { v.archive(thread) })
 		iconButton(c, "More thread actions", moreIcon).Menu(func(m *ui.Menu) {
+			if m.Item("Rename…").Chosen() {
+				v.openRename(thread)
+			}
 			reload := "Retry connection"
 			if thread.Connected {
 				reload = "Reload history"
@@ -540,6 +554,11 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 	t := c.Theme()
 	ui.Column(c.Key(thread.ID)).Grow(1).MinHeight(0).Children(func() {
 		v.threadHeader(c, thread)
+		if thread.TitleError != "" {
+			v.errorBox(c, thread.TitleError, func() {
+				iconButton(c, "Dismiss title error", closeIcon).OnClick(func() { v.app.DismissTitleError(thread.ID) })
+			})
+		}
 		if thread.SessionError != "" {
 			v.errorBox(c, thread.SessionError, func() {
 				if !thread.Archived && !thread.Running && !thread.Configuring && thread.SessionID != "" && !thread.Connected {
