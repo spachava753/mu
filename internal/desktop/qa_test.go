@@ -157,11 +157,10 @@ func TestQAThreadControls(t *testing.T) {
 			if len(a.Snapshot().Threads) != 1 {
 				t.Fatal("create button did not create thread")
 			}
-			if !tt.HasText("Send a message to start the agent.") {
+			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+			if !tt.HasText("Send a message to begin.") {
 				t.Fatal("empty-thread composer not visible")
 			}
-			click("Connect session")
-			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 			click("Fork")
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				for _, thread := range s.Threads {

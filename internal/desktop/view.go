@@ -75,9 +75,12 @@ func (v *View) selectThread(id string) {
 	v.loadSelected()
 }
 
+// loadSelected connects the thread in view: it loads a saved session, or creates
+// one for a new thread, so that the agent's options are there to choose from
+// before the first message.
 func (v *View) loadSelected() {
 	for _, t := range v.app.Snapshot().Threads {
-		if t.ID == v.selected && t.SessionID != "" && !t.Archived {
+		if t.ID == v.selected && !t.Archived {
 			v.fail(v.app.Connect(t.ID))
 			break
 		}
@@ -402,6 +405,15 @@ func (v *View) threadGroups(c *ui.Context, s app.Snapshot, groups []threadGroup,
 
 // threadStatus is the most important state of a thread, if any, and the
 // color that marks it.
+// connectingText is what to say while a session request is under way: the wording
+// given, or, for a thread with no session yet, that the agent is starting.
+func connectingText(thread app.ThreadView, existing string) string {
+	if thread.SessionID == "" {
+		return "Starting the agent…"
+	}
+	return existing
+}
+
 func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 	switch {
 	case thread.Error != "":
@@ -409,7 +421,7 @@ func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 	case len(thread.Permissions) > 0:
 		return "Needs permission", warnColor(t)
 	case thread.Configuring:
-		return "Loading session…", t.TextMuted
+		return connectingText(thread, "Loading session…"), t.TextMuted
 	case thread.Running:
 		status := thread.Status
 		if status == "" {
@@ -662,7 +674,7 @@ func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 			if thread.Connected {
 				reload = "Reload history"
 			}
-			if m.Item(reload).Disabled(thread.Archived || busy || thread.SessionID == "").Chosen() {
+			if m.Item(reload).Disabled(thread.Archived || busy).Chosen() {
 				v.fail(v.app.Reload(thread.ID))
 			}
 			m.Separator()
@@ -684,7 +696,7 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 		}
 		if thread.SessionError != "" {
 			v.errorBox(c, thread.SessionError, func() {
-				if !thread.Archived && !thread.Running && !thread.Configuring && thread.SessionID != "" && !thread.Connected {
+				if !thread.Archived && !thread.Running && !thread.Configuring && !thread.Connected {
 					ui.Button(c, "Retry connection").OnClick(func() { v.fail(v.app.Reload(thread.ID)) })
 				}
 			})
@@ -708,12 +720,15 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 				})
 			}).Grow(1).MinHeight(0).Padding(20, 0, 20, 0).Children(func() {
 				if len(thread.Entries) == 0 {
-					text := "Send a message to start the agent."
+					text := "Send a message to begin."
+					if thread.SessionID == "" && !thread.Connected {
+						text = "Send a message to start the agent."
+					}
 					if thread.SessionID != "" && !thread.Connected {
 						text = "History is stored by the agent. Load the session to view it."
 					}
 					if thread.Configuring {
-						text = "Loading session from agent…"
+						text = connectingText(thread, "Loading session from agent…")
 					}
 					if thread.Archived {
 						text = "Restore this thread to load its history from the agent."
@@ -789,7 +804,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					// With several rows of options, the actions stay on the last.
 					ui.Row(c).AlignSelf(ui.End).Shrink(0).Gap(2).Children(func() {
 						if thread.Running || thread.Configuring {
-							status := "Updating session…"
+							status := connectingText(thread, "Updating session…")
 							if thread.Running {
 								status = thread.Status
 							}
@@ -839,12 +854,8 @@ func roundButton(c *ui.Context, label string, icon *ui.SVG, primary, disabled bo
 }
 
 // inlineOptions shows every option the agent advertises as a menu in the
-// composer toolbar, or legacy modes when it advertises none. A new thread has
-// no options until its session exists, so it offers to connect.
+// composer toolbar, or legacy modes when it advertises none.
 func (v *View) inlineOptions(c *ui.Context, thread app.ThreadView) {
-	if thread.SessionID == "" && !thread.Connected && !thread.Configuring && !thread.Running {
-		quietAction(c, "Connect session", "Connect session", false).Tooltip("Load the options this agent offers. No prompt is sent.").OnClick(func() { v.fail(v.app.Connect(thread.ID)) })
-	}
 	disabled := !thread.Connected || thread.Configuring || thread.Archived
 	for _, o := range thread.Session.Options {
 		about := ""

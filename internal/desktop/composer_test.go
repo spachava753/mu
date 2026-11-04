@@ -33,7 +33,6 @@ func TestLongModelOptionsScroll(t *testing.T) {
 	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			a, tt := composerFixture(t, size[0], size[1])
-			click(t, tt, "Connect session")
 			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 			if tt.HasText("Reasoning: low") || !tt.HasText("low") {
 				t.Fatal("redundant option prefix was not removed")
@@ -121,9 +120,6 @@ func TestSlashCommandPicker(t *testing.T) {
 	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			a, tt := composerFixture(t, size[0], size[1])
-			if !tt.HasText("Context not reported") {
-				t.Fatal("missing explicit unknown usage state")
-			}
 			click(t, tt, "Message")
 			tt.Type("/")
 			tt.Frame()
@@ -238,18 +234,109 @@ func waitEcho(t *testing.T, a *app.App, tt *ui.Tester, text string) {
 	})
 }
 
+// Opening a thread connects it, so that its options are there before the first
+// message, and no prompt goes to the agent. Archived threads stay disconnected.
+func TestOpeningThreadConnects(t *testing.T) {
+	a := testApp(t)
+	first, err := a.Create(fmt.Sprintf("%q session-ui", testutil.Agent(t)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Rename(first, "First"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := a.Create(fmt.Sprintf("%q session-ui", testutil.Agent(t)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := a.Create(fmt.Sprintf("%q session-ui", testutil.Agent(t)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Archive(archived, true); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	// The newest active thread opens at startup, and only that one connects.
+	waitView(t, a, tt, func(s app.Snapshot) bool {
+		v := threadView(s, second)
+		return v.Connected && !v.Configuring && v.SessionID != ""
+	})
+	if _, ok := tt.Find("Model"); !ok {
+		t.Fatal("options are not there before the first message", tt.Texts())
+	}
+	if !tt.HasText("Send a message to begin.") {
+		t.Fatal("empty thread text", tt.Texts())
+	}
+	v := threadView(a.Snapshot(), second)
+	if len(v.Entries) != 0 || v.Running {
+		t.Fatalf("connecting sent a prompt: %+v", v.Entries)
+	}
+	if v := threadView(a.Snapshot(), first); v.Connected || v.Configuring || v.SessionID != "" {
+		t.Fatalf("connected a thread that was not opened: %+v", v.Thread)
+	}
+	click(t, tt, "Thread: First")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return threadView(s, first).Connected })
+	if v := threadView(a.Snapshot(), archived); v.Connected || v.SessionID != "" {
+		t.Fatalf("connected an archived thread: %+v", v.Thread)
+	}
+}
+
+// While a new thread's agent starts, the panel, composer and sidebar all say so.
+func TestConnectingNewThreadSaysStarting(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create(fmt.Sprintf("%q session-ui slow-init slow-new", testutil.Agent(t)), ""); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Configuring })
+	got := 0
+	for _, text := range tt.Texts() {
+		if text == "Starting the agent…" {
+			got++
+		}
+		if strings.Contains(text, "Loading session") || strings.Contains(text, "Updating session") {
+			t.Fatalf("a new thread says %q", text)
+		}
+	}
+	if got != 3 {
+		t.Fatalf("said it %d times: %q", got, tt.Texts())
+	}
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+}
+
+// A new thread whose agent cannot start says so and offers to try again, since no
+// session exists to go back to. Its usage is reported as unknown, not as zero.
+func TestFailedConnectionOffersRetry(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create("mu-test-no-such-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].SessionError != "" && !s.Threads[0].Configuring })
+	first := a.Snapshot().Threads[0].SessionError
+	if !tt.HasText("Context not reported") {
+		t.Fatal("missing explicit unknown usage state", tt.Texts())
+	}
+	if !tt.HasText("Send a message to start the agent.") {
+		t.Fatal("empty thread text", tt.Texts())
+	}
+	screenshot(t, tt, "connection-failed")
+	click(t, tt, "Retry connection")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].SessionError != "" && !s.Threads[0].Configuring })
+	if got := a.Snapshot().Threads[0].SessionError; got != first {
+		t.Fatalf("retry reported %q, then %q", first, got)
+	}
+}
+
 // Every advertised option is a menu in the composer toolbar, whatever its type,
 // and there is no second place to change them.
 func TestComposerOffersEveryOption(t *testing.T) {
 	a, tt := composerFixture(t, 800, 600)
-	if _, ok := tt.Find("Model"); ok {
-		t.Fatal("options shown before the session exists")
-	}
-	click(t, tt, "Connect session")
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
-	if _, ok := tt.Find("Connect session"); ok {
-		t.Fatal("still offers to connect a connected session")
-	}
 	click(t, tt, "More thread actions")
 	if tt.ChooseMenuItem("Session options…") == nil {
 		t.Fatal("the options dialog is still offered")
@@ -284,7 +371,6 @@ func TestManyOptionsStayReachable(t *testing.T) {
 	const height = 600
 	tt := ui.NewTester(desktop.New(a, "").Draw, 800, height)
 	tt.Frame()
-	click(t, tt, "Connect session")
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 	for _, label := range []string{"Message", "Send", "Context usage"} {
 		if r, ok := tt.Find(label); !ok || r.Y < 0 || r.Y+r.H > height {
@@ -325,6 +411,7 @@ func TestComposerKeepsRoomWithPermissions(t *testing.T) {
 	const height = 600
 	tt := ui.NewTester(desktop.New(a, "").Draw, 800, height)
 	tt.Frame()
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 	send := func(prompt string) {
 		t.Helper()
 		if err := a.Send(id, prompt); err != nil {

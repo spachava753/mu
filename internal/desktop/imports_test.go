@@ -130,7 +130,6 @@ func TestUnsupportedAgentErrorOutsideOptionsDialog(t *testing.T) {
 	tt := ui.NewTester(view.Draw, 800, 600)
 	tt.Frame()
 	click(t, tt, "Create thread")
-	click(t, tt, "Connect session")
 	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Configuring && s.Threads[0].SessionError != "" })
 	if !strings.Contains(strings.Join(tt.Texts(), " "), "missing required capabilities: session/fork") {
 		t.Fatal("unsupported-agent error is not visible", tt.Texts())

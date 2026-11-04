@@ -50,7 +50,7 @@ A **project** is a name for an existing folder. Every thread created in a projec
 
 ## Agent connections
 
-For a new thread, the agent starts on the first message or when you choose **Connect session** in the composer toolbar. Opening a saved session starts its agent and loads history automatically, including the selected thread at application startup.
+Opening a thread connects it: a new thread starts its agent and creates a session on the agent, without sending a prompt, so its options are ready before the first message. A thread you never send anything in still leaves that empty session with the agent. Opening a saved session starts its agent and loads history automatically, including the selected thread at application startup.
 
 Threads that use the same agent configuration share one agent process, as ACP allows: each thread is a separate session on that connection, and sessions can work at the same time. Discovery uses the same process. The process starts in the working directory. A saved agent's process keeps running while idle, so opening, archiving, and discovering do not restart it; it stops when Mu quits or when that saved agent is edited or removed and no session still uses it. Threads using a one-off command or an older command snapshot stop their process when their last session closes. If it exits, its threads reconnect on a new process when next used. Threads with different configurations use different processes.
 
@@ -69,7 +69,7 @@ Optional startup flags prefill the form or isolate Mu's data:
 
 ## Session options and updates
 
-The composer toolbar shows every option the agent advertises, such as model and reasoning level, as a compact menu, so the current values are always visible; a tooltip carries the option's description. Select options keep their groups, boolean options offer On and Off, and legacy modes appear only when configuration options are absent. A new thread has no options until its session exists: **Connect session** in the toolbar creates it without sending a prompt. Successful changes replace the full advertised option list, so dependent controls stay in sync. Rejected changes leave the acknowledged values intact and show the agent's error.
+The composer toolbar shows every option the agent advertises, such as model and reasoning level, as a compact menu, so the current values are always visible; a tooltip carries the option's description. Select options keep their groups, boolean options offer On and Off, and legacy modes appear only when configuration options are absent. Successful changes replace the full advertised option list, so dependent controls stay in sync. Rejected changes leave the acknowledged values intact and show the agent's error.
 
 Below the composer, Mu shows the branch of the thread's folder, the short commit when HEAD is detached, and the folder's name when it is a linked worktree. It reads these with local `git` commands while the thread is in view, every few seconds and after each turn. Outside a repository, or without `git`, the line is absent.
 
@@ -77,7 +77,7 @@ If the `gh` command is available and signed in, the same line shows the number a
 
 The composer keeps a **context-usage indicator** visible, with the reported token count, window limit, percentage, and a bar that turns amber at 70% and red at 90%. Reported **session cost** appears alongside it in the agent's currency. Click the indicator for last-turn input/output, thinking and cache counts, and the stop reason; the same panel shows when the agent last updated the session and its metadata. Missing usage is explicitly shown as not reported, never zero. Provider-specific limits and other `_meta` data remain inspectable under **Agent metadata** there, without guessing their meaning.
 
-Type **/** at the start of the draft for a scrollable command picker above the composer. It filters the agent's advertised commands as you type. **Up/Down** selects, **Enter/Tab** inserts, and **Escape** dismisses. Clicking a command also inserts it and returns focus to the draft. Completion never sends a prompt; add arguments and send separately. On a new thread, typing `/` connects to discover commands without sending a prompt.
+Type **/** at the start of the draft for a scrollable command picker above the composer. It filters the agent's advertised commands as you type. **Up/Down** selects, **Enter/Tab** inserts, and **Escape** dismisses. Clicking a command also inserts it and returns focus to the draft. Completion never sends a prompt; add arguments and send separately. If the thread could not connect when it opened, typing **/** tries again, without sending a prompt.
 
 Long model/option lists scroll within a bounded menu rather than extending past the window. Keyboard selection scrolls the highlighted choice into view. Repeated display prefixes, such as “Thinking: high” underneath a Thinking label, are shortened to “high”; protocol values are unchanged.
 
