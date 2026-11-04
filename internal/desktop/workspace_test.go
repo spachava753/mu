@@ -23,3 +23,18 @@ func TestPullRequestState(t *testing.T) {
 		}
 	}
 }
+
+func TestPullRequestLink(t *testing.T) {
+	for url, want := range map[string]string{
+		"https://github.com/o/r/pull/1": "https://github.com/o/r/pull/1",
+		"http://ghe.example/o/r/pull/1": "http://ghe.example/o/r/pull/1",
+		"":                              "",
+		"file:///etc/passwd":            "",
+		"javascript:alert(1)":           "",
+		"-https://github.com/":          "",
+	} {
+		if got := pullRequestLink(workspace.PullRequest{URL: url}); got != want {
+			t.Errorf("%q: %q, want %q", url, got, want)
+		}
+	}
+}

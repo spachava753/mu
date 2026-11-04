@@ -73,7 +73,7 @@ The composer toolbar shows every option the agent advertises, such as model and 
 
 Below the composer, Mu shows the branch of the thread's folder, the short commit when HEAD is detached, and the folder's name when it is a linked worktree. It reads these with local `git` commands while the thread is in view, every few seconds and after each turn. Outside a repository, or without `git`, the line is absent.
 
-If the `gh` command is available and signed in, the same line shows the number and state of the branch's pull request, such as **PR #12 · Open**. Mu runs `gh pr view` for the thread in view: when you open it, after each turn, when its branch changes, and once a minute. With no `gh`, no sign-in, no GitHub remote or no pull request, it shows nothing.
+If the `gh` command is available and signed in, the same line shows the number and state of the branch's pull request, such as **PR #12 · Open**, which you can click to open in your browser. Mu runs `gh pr view` for the thread in view: when you open it, after each turn, when its branch changes, and once a minute. With no `gh`, no sign-in, no GitHub remote or no pull request, it shows nothing.
 
 The composer keeps a **context-usage indicator** visible, with the reported token count, window limit, percentage, and a bar that turns amber at 70% and red at 90%. Reported **session cost** appears alongside it in the agent's currency. Click the indicator for last-turn input/output, thinking and cache counts, and the stop reason; the same panel shows when the agent last updated the session and its metadata. Missing usage is explicitly shown as not reported, never zero. Provider-specific limits and other `_meta` data remain inspectable under **Agent metadata** there, without guessing their meaning.
 

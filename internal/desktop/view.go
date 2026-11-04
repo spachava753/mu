@@ -771,7 +771,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					ui.Button(c, "Restore thread").OnClick(func() { v.archive(thread) })
 				})
 				v.usageLine(c, thread, false)
-				gitLine(c, thread.Git, thread.PullRequest)
+				v.gitLine(c, thread.Git, thread.PullRequest)
 				return
 			}
 			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(8).Border(1, hairline(t)).Background(t.Surface)
@@ -813,7 +813,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 			})
 			// The keyboard hint is the first thing to go in a narrow window.
 			v.usageLine(c, thread, box.Bounds().W >= 600)
-			gitLine(c, thread.Git, thread.PullRequest)
+			v.gitLine(c, thread.Git, thread.PullRequest)
 		})
 	})
 }

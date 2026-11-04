@@ -18,6 +18,7 @@ type PullRequest struct {
 	State  string // OPEN, CLOSED or MERGED, as GitHub reports it
 	Draft  bool
 	Title  string
+	URL    string
 }
 
 // Found reports whether the branch has a pull request.
@@ -32,7 +33,7 @@ func InspectPullRequest(ctx context.Context, dir string) (PullRequest, error) {
 	if err != nil {
 		return PullRequest{}, nil
 	}
-	cmd := exec.CommandContext(ctx, path, "pr", "view", "--json", "number,state,isDraft,title")
+	cmd := exec.CommandContext(ctx, path, "pr", "view", "--json", "number,state,isDraft,title,url")
 	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
 	cmd.Env = append(folderEnv(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1", "NO_COLOR=1", "LC_ALL=C")
@@ -52,11 +53,12 @@ func InspectPullRequest(ctx context.Context, dir string) (PullRequest, error) {
 		State   string `json:"state"`
 		IsDraft bool   `json:"isDraft"`
 		Title   string `json:"title"`
+		URL     string `json:"url"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
 		return PullRequest{}, fmt.Errorf("gh pr view: %w", err)
 	}
-	return PullRequest{Number: reply.Number, State: reply.State, Draft: reply.IsDraft, Title: reply.Title}, nil
+	return PullRequest{Number: reply.Number, State: reply.State, Draft: reply.IsDraft, Title: reply.Title, URL: reply.URL}, nil
 }
 
 // noPullRequest reports whether gh's failure means there is nothing to show,

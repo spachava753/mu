@@ -1,6 +1,7 @@
 package desktop_test
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -453,6 +454,65 @@ func TestPullRequestLine(t *testing.T) {
 			screenshot(t, tt2, "pull-request-"+tt.name)
 		})
 	}
+}
+
+// The pull request opens in the browser, if it has an address to open.
+func TestPullRequestOpens(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	const label = "PR #12 · Open: Fix it"
+	open := func(t *testing.T, url string) (*app.App, *ui.Tester) {
+		t.Helper()
+		testutil.FakeGH(t, `echo '{"number":12,"state":"OPEN","isDraft":false,"title":"Fix it","url":"`+url+`"}'`)
+		a := testApp(t)
+		if _, err := a.Create("unused-agent", ""); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("git", "init", "-q", "-b", "main")
+		cmd.Dir = a.Snapshot().Threads[0].Cwd
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+		tt.Frame()
+		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].PullRequest.Found() })
+		return a, tt
+	}
+	t.Run("opens", func(t *testing.T) {
+		const url = "https://github.com/o/r/pull/12"
+		_, tt := open(t, url)
+		click(t, tt, label)
+		if got := tt.OpenedURLs(); len(got) != 1 || got[0] != url {
+			t.Fatalf("opened %q", got)
+		}
+		r, ok := tt.Find(label)
+		if !ok {
+			t.Fatal("no pull request")
+		}
+		tt.Move(r.X+r.W/2, r.Y+r.H/2)
+		tt.Frame()
+		if tt.Cursor() != ui.CursorPointer {
+			t.Fatal("the pull request does not look clickable")
+		}
+		tt.Advance(160 * time.Millisecond)
+		screenshot(t, tt, "pull-request-hover")
+	})
+	t.Run("nothing to open it", func(t *testing.T) {
+		_, tt := open(t, "https://github.com/o/r/pull/12")
+		tt.FailOpenURL(errors.New("no browser"))
+		click(t, tt, label)
+		if !tt.HasText("no browser") {
+			t.Fatal("the failure is not shown", tt.Texts())
+		}
+	})
+	t.Run("not a web address", func(t *testing.T) {
+		_, tt := open(t, "file:///etc/passwd")
+		click(t, tt, label)
+		if got := tt.OpenedURLs(); len(got) != 0 {
+			t.Fatalf("opened %q", got)
+		}
+	})
 }
 
 func threadView(s app.Snapshot, id string) app.ThreadView {

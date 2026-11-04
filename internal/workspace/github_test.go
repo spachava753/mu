@@ -15,7 +15,7 @@ func TestInspectPullRequest(t *testing.T) {
 		name, reply string
 		want        PullRequest
 	}{
-		{"open", `{"number":12,"state":"OPEN","isDraft":false,"title":"Fix"}`, PullRequest{Number: 12, State: "OPEN", Title: "Fix"}},
+		{"open", `{"number":12,"state":"OPEN","isDraft":false,"title":"Fix","url":"https://github.com/o/r/pull/12"}`, PullRequest{Number: 12, State: "OPEN", Title: "Fix", URL: "https://github.com/o/r/pull/12"}},
 		{"draft", `{"number":13,"state":"OPEN","isDraft":true,"title":"Wip"}`, PullRequest{Number: 13, State: "OPEN", Draft: true, Title: "Wip"}},
 		{"merged", `{"number":14,"state":"MERGED","isDraft":false,"title":"Done"}`, PullRequest{Number: 14, State: "MERGED", Title: "Done"}},
 		{"closed", `{"number":15,"state":"CLOSED","isDraft":false,"title":"No"}`, PullRequest{Number: 15, State: "CLOSED", Title: "No"}},
@@ -104,7 +104,7 @@ func TestInspectPullRequestEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(b)
-	for _, want := range []string{dir + "\n", "pr view --json number,state,isDraft,title\n", "repo= gitdir= prompt=1 notifier=1"} {
+	for _, want := range []string{dir + "\n", "pr view --json number,state,isDraft,title,url\n", "repo= gitdir= prompt=1 notifier=1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in:\n%s", want, got)
 		}
