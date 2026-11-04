@@ -91,22 +91,28 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
+// folderEnv is the environment without the variables that would point a command
+// at another repository than the folder it runs in.
+func folderEnv() []string {
+	var env []string
+	for _, v := range os.Environ() {
+		name, _, _ := strings.Cut(v, "=")
+		switch name {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GH_REPO":
+		default:
+			env = append(env, v)
+		}
+	}
+	return env
+}
+
 // git runs a read-only command in dir and returns its output. It takes no
-// optional locks, so it cannot get in the way of the agent's own git commands,
-// and ignores variables that would point it at another repository.
+// optional locks, so it cannot get in the way of the agent's own git commands.
 func git(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
-	for _, v := range os.Environ() {
-		name, _, _ := strings.Cut(v, "=")
-		switch name {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE":
-		default:
-			cmd.Env = append(cmd.Env, v)
-		}
-	}
-	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C") // noRepository reads its messages.
+	cmd.Env = append(folderEnv(), "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C") // noRepository reads its messages.
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {

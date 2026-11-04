@@ -64,7 +64,8 @@ type ThreadView struct {
 	Connected    bool
 	Configuring  bool
 	SessionError string
-	Git          workspace.Git // as last read, while the thread was in view
+	Git          workspace.Git         // as last read, while the thread was in view
+	PullRequest  workspace.PullRequest // of the branch in Git, if known
 }
 
 type Snapshot struct {
@@ -150,6 +151,8 @@ type App struct {
 	focused         string                   // the thread in view
 	workspaces      map[string]workspace.Git // the last reading of each folder
 	workspaceWake   chan struct{}
+	pullRequests    map[[2]string]workspace.PullRequest // the last answer for each folder and branch
+	pullRequestWake chan struct{}
 	wg              sync.WaitGroup
 	closed          bool
 	dirty           bool
@@ -186,10 +189,12 @@ func Open(dir, defaultWorkingDir string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1)}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1), pullRequests: map[[2]string]workspace.PullRequest{}, pullRequestWake: make(chan struct{}, 1)}
 	a.ctx, a.cancelCtx = context.WithCancel(context.Background())
 	a.wg.Add(1)
 	go a.watchWorkspace()
+	a.wg.Add(1)
+	go a.watchPullRequest()
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -256,7 +261,8 @@ func (a *App) Snapshot() Snapshot {
 	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
 	for _, t := range a.data.Threads {
 		t.AdditionalDirectories = slices.Clone(t.AdditionalDirectories)
-		v := ThreadView{Thread: t, Git: a.workspaces[t.Cwd]}
+		git := a.workspaces[t.Cwd]
+		v := ThreadView{Thread: t, Git: git, PullRequest: a.pullRequests[[2]string{t.Cwd, git.Branch}]}
 		if r := a.runtimes[t.ID]; r != nil {
 			v.Conversation = r.Conversation
 			v.Entries = slices.Clone(r.Entries)

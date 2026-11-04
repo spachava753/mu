@@ -73,6 +73,8 @@ The composer toolbar shows every option the agent advertises, such as model and 
 
 Below the composer, Mu shows the branch of the thread's folder, the short commit when HEAD is detached, and the folder's name when it is a linked worktree. It reads these with local `git` commands while the thread is in view, every few seconds and after each turn. Outside a repository, or without `git`, the line is absent.
 
+If the `gh` command is available and signed in, the same line shows the number and state of the branch's pull request, such as **PR #12 · Open**. Mu runs `gh pr view` for the thread in view: when you open it, after each turn, when its branch changes, and once a minute. With no `gh`, no sign-in, no GitHub remote or no pull request, it shows nothing.
+
 The composer keeps a **context-usage indicator** visible, with the reported token count, window limit, percentage, and a bar that turns amber at 70% and red at 90%. Reported **session cost** appears alongside it in the agent's currency. Click the indicator for last-turn input/output, thinking and cache counts, and the stop reason; the same panel shows when the agent last updated the session and its metadata. Missing usage is explicitly shown as not reported, never zero. Provider-specific limits and other `_meta` data remain inspectable under **Agent metadata** there, without guessing their meaning.
 
 Type **/** at the start of the draft for a scrollable command picker above the composer. It filters the agent's advertised commands as you type. **Up/Down** selects, **Enter/Tab** inserts, and **Escape** dismisses. Clicking a command also inserts it and returns focus to the draft. Completion never sends a prompt; add arguments and send separately. On a new thread, typing `/` connects to discover commands without sending a prompt.
@@ -122,7 +124,7 @@ Mu is a greenfield project with no established data model and no users depending
 
 **Mu is not a sandbox.** Agent executables inherit your environment and run with your user permissions. Only run agents and commands you trust. Permission controls answer requests the agent actually sends; Mu cannot force every agent tool to request approval. Mu performs no file access or command execution on an agent's behalf. On Unix, cleanup terminates the agent's process group; on Windows only direct child termination is implemented.
 
-No telemetry or automatic network calls are made by Mu itself. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
+Mu sends no telemetry. Its only network activity is `gh pr view` above, made by your own `gh` with your own credentials, and only when `gh` is installed. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
 
 ## Check
 

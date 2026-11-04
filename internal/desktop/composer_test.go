@@ -420,6 +420,41 @@ func TestGitLine(t *testing.T) {
 	}
 }
 
+// The git line also shows the branch's pull request, from a stand-in gh.
+func TestPullRequestLine(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	for _, tt := range []struct {
+		name, reply, want string
+	}{
+		{"open", `{"number":1234,"state":"OPEN","isDraft":false,"title":"Keep it"}`, "PR #1234 · Open"},
+		{"draft", `{"number":12,"state":"OPEN","isDraft":true,"title":"Not yet"}`, "PR #12 · Draft"},
+		{"merged", `{"number":13,"state":"MERGED","isDraft":false,"title":"Done"}`, "PR #13 · Merged"},
+		{"closed", `{"number":14,"state":"CLOSED","isDraft":false,"title":"Dropped"}`, "PR #14 · Closed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.FakeGH(t, "echo '"+tt.reply+"'")
+			a := testApp(t)
+			if _, err := a.Create("unused-agent", ""); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("git", "init", "-q", "-b", "feature/resize")
+			cmd.Dir = a.Snapshot().Threads[0].Cwd
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			tt2 := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+			tt2.Frame()
+			waitView(t, a, tt2, func(s app.Snapshot) bool { return s.Threads[0].PullRequest.Found() })
+			if !tt2.HasText(tt.want) || !tt2.HasText("feature/resize") {
+				t.Fatal("no pull request on the line", tt2.Texts())
+			}
+			screenshot(t, tt2, "pull-request-"+tt.name)
+		})
+	}
+}
+
 func threadView(s app.Snapshot, id string) app.ThreadView {
 	for _, v := range s.Threads {
 		if v.ID == id {

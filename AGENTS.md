@@ -16,7 +16,7 @@ When making a breaking change to the data model or persistence layer, wipe the e
 - `internal/desktop`: native view; use `ui.NewTester` for interaction tests.
 - `internal/app`: synchronized thread state, ACP lifecycle, shared agent connections (`connections.go`), projects and thread folders, permission handling, and persistence orchestration.
 - `internal/agent`: stdio ACP connection and agent process.
-- `internal/workspace`: reads the git state of a folder through local commands, with no UI or app state.
+- `internal/workspace`: reads a folder's git state and pull request through the `git` and `gh` commands, with no UI or app state. Tests must never reach the real `gh`.
 - `internal/state`: session references and settings with an exclusive process lock and atomic saves. Never persist conversations or SDK session state.
 - `internal/agent/testdata/agent`: deterministic stdio agent used by tests.
 
