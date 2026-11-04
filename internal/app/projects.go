@@ -29,6 +29,15 @@ func (a *App) threadDirLocked(projectID string) (dir string, created bool, err e
 	return dir, false, nil
 }
 
+// SuggestProjectName names a project after its folder.
+func SuggestProjectName(dir string) string {
+	name := filepath.Base(filepath.Clean(dir))
+	if name == "." || name == string(filepath.Separator) {
+		return ""
+	}
+	return name
+}
+
 // SaveProject adds or edits a project. Its folder must already exist; Mu
 // never creates or deletes project folders. Existing threads keep the folder
 // they were created in.

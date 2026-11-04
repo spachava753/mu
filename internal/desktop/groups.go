@@ -1,15 +1,21 @@
 package desktop
 
-import "github.com/spachava753/mu/internal/app"
+import (
+	"github.com/spachava753/mu/internal/app"
+	"github.com/spachava753/mu/internal/state"
+)
 
 // threadGroup is one section of the sidebar's thread list.
 type threadGroup struct {
 	Key, Name string // Name is empty when the section has no heading
+	Project   *state.Project
 	Threads   []app.ThreadView
 }
 
 // groupThreads arranges the listed threads into the sidebar's sections: by
-// project once any project exists, with threads without a project last.
+// project once any project exists, with threads without a project last. Every
+// project has a section in the active list, even with no threads yet, since
+// that is where its actions are.
 func groupThreads(s app.Snapshot, archived bool) []threadGroup {
 	byProject := map[string][]app.ThreadView{}
 	for _, t := range s.Threads {
@@ -18,9 +24,9 @@ func groupThreads(s app.Snapshot, archived bool) []threadGroup {
 		}
 	}
 	var groups []threadGroup
-	for _, p := range s.Projects {
-		if threads := byProject[p.ID]; len(threads) > 0 {
-			groups = append(groups, threadGroup{Key: p.ID, Name: p.Name, Threads: threads})
+	for i, p := range s.Projects {
+		if threads := byProject[p.ID]; len(threads) > 0 || !archived {
+			groups = append(groups, threadGroup{Key: p.ID, Name: p.Name, Project: &s.Projects[i], Threads: threads})
 		}
 		delete(byProject, p.ID)
 	}

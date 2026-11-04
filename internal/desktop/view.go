@@ -28,9 +28,7 @@ type View struct {
 	renaming, renameFresh                bool
 	renameID, renameTitle, renameError   string
 	command, agentID, workDir, projectID string
-	editProject                          state.Project
-	projectNotice                        string
-	projectForm                          bool
+	projects                             projectEditor
 	customCommand                        bool
 	editAgent                            state.AgentConfig
 	makeDefault                          bool
@@ -41,6 +39,10 @@ type View struct {
 	lists                                map[string]*ui.ListState
 	expanded                             map[string]*bool
 	md                                   markdown.Options
+	// ChooseFolder shows the native folder picker and returns the chosen path,
+	// or "" if cancelled. It blocks, so the view calls it off the UI thread.
+	// Without it, a folder can still be typed.
+	ChooseFolder func() (string, error)
 }
 
 func New(a *app.App, command string) *View {
@@ -89,6 +91,11 @@ func (v *View) openNew() {
 			v.projectID = t.ProjectID
 		}
 	}
+}
+// openNewIn opens the new-thread form with a project chosen.
+func (v *View) openNewIn(projectID string) {
+	v.openNew()
+	v.projectID = projectID
 }
 func (v *View) fail(err error) {
 	if err != nil {
@@ -224,7 +231,7 @@ func (v *View) Draw(c *ui.Context) {
 		}
 	}
 	matte(c)
-	if v.selection.active() && !v.deleting && !v.renaming {
+	if v.selection.active() && !v.deleting && !v.renaming && !v.projects.open && !v.projects.removing {
 		c.OnShortcut(0, ui.KeyEscape, v.endSelection)
 	}
 	v.md.Theme = markdownTheme(c.Theme())
@@ -296,6 +303,8 @@ func (v *View) Draw(c *ui.Context) {
 	})
 	v.sessionDialog(c, s)
 	v.renameDialog(c)
+	v.projectDialog(c)
+	v.removeProjectDialog(c, s)
 	v.removeAgentDialog(c)
 }
 
@@ -317,6 +326,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 				iconButton(c, "Expand sidebar", panelIcon).OnClick(toggle)
 				ui.Box(c).Height(8)
 				iconButton(c, "New thread", plusIcon).OnClick(v.openNew)
+				iconButton(c, "New project", folderPlusIcon).OnClick(v.openNewProject)
 				iconButton(c, "Import sessions", importIcon).OnClick(v.openImports)
 				ui.Spacer(c)
 				iconButton(c, "Settings", gearIcon).OnClick(v.openSettings)
@@ -355,7 +365,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 			})
 			ui.Scroll(c).Grow(1).MinHeight(0).Gap(1).Padding(2, 10, 8, 10).Children(func() {
 				v.threadGroups(c, s, groups, order)
-				if count == 0 {
+				if len(groups) == 0 {
 					text := "No threads yet."
 					if v.archived {
 						text = "No archived threads."
@@ -367,6 +377,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 				v.bulkBar(c, order)
 			}
 			ui.Column(c).Shrink(0).Padding(6, 10, 10, 10).Gap(1).Children(func() {
+				navRow(c, "New project", folderPlusIcon, false).OnClick(v.openNewProject)
 				navRow(c, "Import sessions", importIcon, v.importOpen).OnClick(v.openImports)
 				navRow(c, "Settings", gearIcon, v.settingsOpen).OnClick(v.openSettings)
 			})
@@ -377,8 +388,14 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 // threadGroups lists the visible threads under their sections.
 func (v *View) threadGroups(c *ui.Context, s app.Snapshot, groups []threadGroup, order []string) {
 	for _, group := range groups {
-		if group.Name != "" {
-			ui.Text(c.Key("group-"+group.Key), group.Name).Padding(10, 8, 3, 8).FontSize(11.5).FontWeight(500).TextColor(faint(c.Theme())).SingleLine()
+		switch {
+		case group.Project != nil:
+			v.projectHeading(c, *group.Project)
+			if len(group.Threads) == 0 {
+				ui.Text(c, "No threads yet").Padding(2, 8, 4, 8).FontSize(11.5).TextColor(faint(c.Theme()))
+			}
+		case group.Name != "":
+			ui.Text(c.Key("group-"+group.Key), group.Name).Padding(12, 8, 4, 8).FontSize(11.5).FontWeight(500).TextColor(faint(c.Theme())).SingleLine()
 		}
 		for _, thread := range group.Threads {
 			v.threadRow(c, s, thread, order)
@@ -582,7 +599,7 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 				selectChoice(c.Key("project"), "Thread project", v.projectID, choices, false, func(id string) { v.projectID = id })
 				ui.Text(c, folder).FontSize(12.5).TextColor(t.TextMuted)
 				ui.Row(c).Gap(4).Margin(-2, 0, 0, -7).Children(func() {
-					quietButton(c, "Manage projects").OnClick(v.openSettings)
+					quietAction(c, "New project", "New project for this thread", false).OnClick(v.openNewProject)
 				})
 			})
 			ui.Row(c).Gap(8).Children(func() {

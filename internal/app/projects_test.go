@@ -116,3 +116,11 @@ func TestProjectsShareTheirFolder(t *testing.T) {
 		t.Fatal("created a thread in a removed project")
 	}
 }
+
+func TestSuggestProjectName(t *testing.T) {
+	for dir, want := range map[string]string{"/home/me/website": "website", "/home/me/website/": "website", "/": "", "": ""} {
+		if got := SuggestProjectName(dir); got != want {
+			t.Fatalf("%q: %q", dir, got)
+		}
+	}
+}

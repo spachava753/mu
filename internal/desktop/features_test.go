@@ -1,6 +1,7 @@
 package desktop_test
 
 import (
+	"errors"
 	"fmt"
 	"image/png"
 	"os"
@@ -249,19 +250,35 @@ func projectsUI(t *testing.T, width, height int) {
 	if _, err := a.Create("unused-agent", ""); err != nil {
 		t.Fatal(err)
 	}
-	click(t, tt, "Settings")
-	click(t, tt, "Add project")
+	// A project starts from the sidebar, without going through Settings.
+	click(t, tt, "New project")
+	screenshot(t, tt, fmt.Sprintf("project-dialog-%d", width))
 	click(t, tt, "Project name")
 	tt.Type("Website")
 	tt.Frame()
 	click(t, tt, "Project folder")
+	tt.Type(folder + "/missing")
+	tt.Frame()
+	click(t, tt, "Create project")
+	if !tt.HasText("must be an existing folder") || len(a.Snapshot().Projects) != 0 {
+		t.Fatal("bad folder not reported in the dialog", tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("project-dialog-error-%d", width))
+	click(t, tt, "Project folder")
+	tt.Key(ui.Cmd, ui.KeyA)
 	tt.Type(folder)
 	tt.Frame()
-	click(t, tt, "Save project")
+	click(t, tt, "Create project")
 	s := a.Snapshot()
-	if len(s.Projects) != 1 || s.Projects[0].Dir != folder || !tt.HasText("Project saved.") {
+	if len(s.Projects) != 1 || s.Projects[0].Dir != folder {
 		t.Fatal("project not saved", s.Projects, tt.Texts())
 	}
+	// It is listed straight away, empty, with its actions.
+	if _, ok := tt.Find("Project actions: Website"); !ok || !tt.HasText("No threads yet") {
+		t.Fatal("empty project is not in the sidebar", tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("project-sidebar-empty-%d", width))
+	click(t, tt, "Settings")
 	screenshot(t, tt, fmt.Sprintf("project-settings-%d", width))
 	click(t, tt, "Done")
 	click(t, tt, "New thread")
@@ -270,7 +287,10 @@ func projectsUI(t *testing.T, width, height int) {
 		t.Fatal("new thread does not default to its own folder", tt.Texts())
 	}
 	click(t, tt, "Thread project")
-	click(t, tt, "Website")
+	tt.Key(0, ui.KeyDown) // "Website" also names the sidebar's section.
+	tt.Key(0, ui.KeyEnter)
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
 	if !tt.HasText("shared by every thread in this project.") {
 		t.Fatal("project folder not explained", tt.Texts())
 	}
@@ -290,12 +310,142 @@ func projectsUI(t *testing.T, width, height int) {
 	if s = a.Snapshot(); len(s.Threads) != 3 || s.Threads[0].ProjectID != s.Threads[1].ProjectID {
 		t.Fatal("new thread left the current project", s.Threads)
 	}
+	// Edit it from the sidebar's menu.
+	click(t, tt, "Project actions: Website")
+	if err := tt.ChooseMenuItem("Edit project…"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	if !tt.HasText("Edit project") {
+		t.Fatal("edit dialog did not open", tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("project-edit-%d", width))
+	click(t, tt, "Cancel")
+	// A new thread can start in it directly.
+	click(t, tt, "New thread in Website")
+	if !tt.HasText("shared by every thread in this project.") {
+		t.Fatal("the project was not chosen", tt.Texts())
+	}
+	click(t, tt, "Cancel")
+	// Removal asks first, and says what stays; Settings reaches it too.
 	click(t, tt, "Settings")
 	click(t, tt, "Edit project: Website")
+	click(t, tt, "Remove project…")
+	if !tt.HasText("Remove project “Website”?") || !tt.HasText("threads stay") {
+		t.Fatal("no removal confirmation", tt.Texts())
+	}
+	screenshot(t, tt, fmt.Sprintf("project-remove-%d", width))
+	click(t, tt, "Keep project")
+	if len(a.Snapshot().Projects) != 1 {
+		t.Fatal("Keep project removed it")
+	}
+	click(t, tt, "Done")
+	click(t, tt, "Project actions: Website")
+	if err := tt.ChooseMenuItem("Remove project…"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
 	click(t, tt, "Remove project")
 	if s = a.Snapshot(); len(s.Projects) != 0 || s.Threads[0].Cwd != folder {
 		t.Fatal("project removal changed threads", s)
 	}
+	if _, err := os.Stat(folder); err != nil {
+		t.Fatal("removal touched the folder", err)
+	}
+}
+
+// The native picker fills the folder, and names a project left unnamed. The
+// new-thread form takes a project it created.
+func TestProjectFolderPickerUI(t *testing.T) {
+	a := testApp(t)
+	folder := t.TempDir()
+	view := desktop.New(a, "unused-agent")
+	answers := make(chan folderAnswer, 3)
+	view.ChooseFolder = func() (string, error) { r := <-answers; return r.path, r.err }
+	tt := ui.NewTester(view.Draw, 1100, 780)
+	tt.Frame()
+	click(t, tt, "New thread")
+	click(t, tt, "New project for this thread")
+	pick := func(answer folderAnswer) {
+		t.Helper()
+		click(t, tt, "Choose…")
+		answers <- answer
+		for range 10 { // The result arrives off the UI thread.
+			time.Sleep(10 * time.Millisecond)
+			tt.Advance(120 * time.Millisecond)
+			tt.Frame()
+		}
+	}
+	pick(folderAnswer{err: errors.New("no portal")})
+	if !tt.HasText("Could not open the folder picker") {
+		t.Fatal("picker failure not shown", tt.Texts())
+	}
+	screenshot(t, tt, "project-picker-error")
+	// Cancelling leaves the form alone, and picking clears the failure.
+	pick(folderAnswer{})
+	if !tt.HasText("Could not open the folder picker") {
+		t.Fatal("cancelling changed the form", tt.Texts())
+	}
+	pick(folderAnswer{path: folder})
+	if tt.HasText("Could not open the folder picker") {
+		t.Fatal("picking kept the failure", tt.Texts())
+	}
+	click(t, tt, "Create project")
+	s := a.Snapshot()
+	if len(s.Projects) != 1 || s.Projects[0].Dir != folder || s.Projects[0].Name != filepath.Base(folder) {
+		t.Fatalf("picked project: %+v", s.Projects)
+	}
+	if !tt.HasText("shared by every thread in this project.") {
+		t.Fatal("the new-thread form did not take the new project", tt.Texts())
+	}
+	// The picker of a closed dialog cannot change a later one.
+	click(t, tt, "New project for this thread")
+	click(t, tt, "Choose…")
+	click(t, tt, "Cancel")
+	click(t, tt, "New project for this thread")
+	answers <- folderAnswer{path: t.TempDir()}
+	for range 10 {
+		time.Sleep(10 * time.Millisecond)
+		tt.Advance(120 * time.Millisecond)
+		tt.Frame()
+	}
+	click(t, tt, "Project name")
+	tt.Type("Stale")
+	tt.Frame()
+	click(t, tt, "Create project") // Disabled: this dialog has no folder.
+	if n := len(a.Snapshot().Projects); n != 1 {
+		t.Fatalf("a late result filled a later dialog: %d projects", n)
+	}
+	click(t, tt, "Cancel")
+	// The sidebar's button also serves the form, and a new project is shown
+	// even from the archived list.
+	click(t, tt, "Archived")
+	if _, shown := tt.Find("Project actions: " + filepath.Base(folder)); shown {
+		t.Fatal("empty project listed among archived threads")
+	}
+	second := t.TempDir()
+	click(t, tt, "New project")
+	click(t, tt, "Project folder")
+	tt.Type(second)
+	tt.Frame()
+	click(t, tt, "Project name")
+	tt.Type("Second")
+	tt.Frame()
+	click(t, tt, "Create project")
+	if _, shown := tt.Find("Project actions: Second"); !shown {
+		t.Fatal("new project is not visible", tt.Texts())
+	}
+	s = a.Snapshot()
+	if !tt.HasText("Works in") || !tt.HasText(filepath.Base(second)) {
+		t.Fatal("the form behind the sidebar's button did not take the project", tt.Texts())
+	}
+}
+
+type folderAnswer struct {
+	path string
+	err  error
 }
 
 func TestRenameThreadUI(t *testing.T) {

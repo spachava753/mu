@@ -22,7 +22,6 @@ func (v *View) openSettings() {
 	}
 	v.makeDefault = v.editAgent.ID != "" && v.editAgent.ID == s.DefaultAgentID
 	v.workDir = s.WorkingDirectory
-	v.editProject, v.projectNotice, v.projectForm = state.Project{}, "", false
 }
 
 func (v *View) settings(c *ui.Context, s app.Snapshot) {
@@ -148,88 +147,6 @@ func (v *View) removeAgentDialog(c *ui.Context) {
 				}
 				v.removeAgent = false
 			})
-		})
-	})
-}
-
-// projectSettings lists projects and edits one. A project is a named,
-// existing folder that all of its threads work in.
-func (v *View) projectSettings(c *ui.Context, s app.Snapshot) {
-	t := c.Theme()
-	ui.Row(c).Gap(8).Margin(12, 0, 0, 0).Children(func() {
-		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-			ui.Text(c, "Projects").FontSize(13).FontWeight(500)
-			ui.Text(c, "Every thread in a project works in the project's folder.").FontSize(11.5).TextColor(t.TextMuted)
-		})
-		ui.Button(c, "Add project").OnClick(func() { v.editProject, v.projectNotice, v.err, v.projectForm = state.Project{}, "", "", true })
-	})
-	if len(s.Projects) > 0 {
-		ui.Column(c).Radius(8).Border(1, t.Border).Clip().Children(func() {
-			for i, project := range s.Projects {
-				row := ui.ButtonBase(c.Key(project.ID)).Transition(colorMotion).Label("Edit project: "+project.Name).FillWidth().Padding(9, 14).Gap(10)
-				if i > 0 {
-					row.BorderWidth(1, 0, 0, 0).BorderColor(t.Border)
-				}
-				row.Background(rowColor(t, project.ID == v.editProject.ID, row.Hovered()))
-				row.Children(func() {
-					ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-						ui.Text(c, project.Name).FontSize(13).FontWeight(500).SingleLine()
-						ui.Text(c, shortPath(project.Dir)).SingleLine().Font("monospace").FontSize(11.5).TextColor(t.TextMuted).Tooltip(project.Dir)
-					})
-				}).OnClick(func() { v.editProject, v.projectNotice, v.err, v.projectForm = project, "", "", true })
-			}
-		})
-	}
-	if v.projectNotice != "" {
-		ui.Row(c).Gap(6).Children(func() {
-			ui.Icon(c, checkIcon).Size(14, 14).TextColor(okColor(t))
-			ui.Text(c, v.projectNotice).FontSize(12).TextColor(t.TextMuted)
-		})
-	}
-	if !v.projectForm {
-		return
-	}
-	ui.Column(c).Padding(16).Gap(16).Radius(8).Border(1, t.Border).Background(t.Surface).Children(func() {
-		heading := "Add a project"
-		if v.editProject.ID != "" {
-			heading = "Edit project"
-		}
-		ui.Text(c, heading).FontSize(13).FontWeight(500)
-		field(c, "Name", "", func() {
-			ui.TextInput(c.Key("project-name"), &v.editProject.Name).Label("Project name").Placeholder("A name for this project")
-		})
-		field(c, "Folder", "An existing folder. Existing threads keep the folder they started in.", func() {
-			ui.TextInput(c.Key("project-folder"), &v.editProject.Dir).Label("Project folder").Placeholder("/absolute/path/to/project")
-		})
-		ui.Row(c).Gap(8).Children(func() {
-			ui.PrimaryButton(c, "Save project").Disabled(strings.TrimSpace(v.editProject.Name) == "" || strings.TrimSpace(v.editProject.Dir) == "").OnClick(func() {
-				id, err := v.app.SaveProject(v.editProject)
-				if err != nil {
-					v.fail(err)
-					return
-				}
-				for _, p := range v.app.Snapshot().Projects {
-					if p.ID == id {
-						v.editProject = p
-					}
-				}
-				v.projectNotice, v.err, v.projectForm = "Project saved.", "", false
-			})
-			ui.Button(c, "Cancel").OnClick(func() { v.editProject, v.projectForm = state.Project{}, false })
-			ui.Spacer(c)
-			if v.editProject.ID != "" {
-				ui.Button(c, "Remove project").TextColor(t.Danger).OnClick(func() {
-					if err := v.app.RemoveProject(v.editProject.ID); err != nil {
-						v.fail(err)
-						return
-					}
-					if v.projectID == v.editProject.ID {
-						v.projectID = ""
-					}
-					v.editProject, v.projectForm = state.Project{}, false
-					v.projectNotice = "Project removed. Its threads and folder are unchanged."
-				})
-			}
 		})
 	})
 }

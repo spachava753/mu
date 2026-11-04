@@ -43,6 +43,13 @@ func run() (err error) {
 		}
 	}()
 	view := desktop.New(a, *command)
+	view.ChooseFolder = func() (string, error) {
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Title: "Choose project folder", ButtonLabel: "Choose", Directory: true, CreateDirectories: true})
+		if err != nil || len(paths) == 0 {
+			return "", err
+		}
+		return paths[0], nil
+	}
 	mygo.App.SetName("Mu")
 	mygo.App.WhenReady(func() {
 		w := mygo.NewWindow(mygo.WindowOptions{Title: "Mu", Width: 1100, Height: 780, MinWidth: 800, MinHeight: 600, Content: ui.View(view.Draw)})
