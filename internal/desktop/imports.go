@@ -15,7 +15,7 @@ type forkResult struct {
 }
 
 func (v *View) openImports() {
-	v.importOpen, v.settingsOpen, v.sessionOpen, v.usageOpen = true, false, false, false
+	v.importOpen, v.settingsOpen, v.usageOpen = true, false, false
 	v.agentID = v.app.Snapshot().DefaultAgentID
 	v.importSelected = map[string]bool{}
 	v.importQuery, v.importNotice, v.err = "", "", ""

@@ -2,6 +2,7 @@ package desktop_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,20 +29,20 @@ func TestLongModelOptionsScroll(t *testing.T) {
 	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			a, tt := composerFixture(t, size[0], size[1])
-			click(t, tt, "Session options")
+			click(t, tt, "Connect session")
 			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 			if tt.HasText("Reasoning: low") || !tt.HasText("low") {
 				t.Fatal("redundant option prefix was not removed")
 			}
-			click(t, tt, "Set Model")
-			menu, ok := tt.Find("Set Model choices")
+			click(t, tt, "Model")
+			menu, ok := tt.Find("Model choices")
 			if !ok {
 				t.Fatal("missing scroll area")
 			}
 			if menu.H > 301 || menu.Y < 0 || menu.Y+menu.H > float32(size[1]) {
 				t.Fatalf("menu exceeds window: %+v", menu)
 			}
-			// Wheel scrolling must reach the last choice, not scroll the modal.
+			// Wheel scrolling must reach the last choice, not scroll anything behind it.
 			tt.Move(menu.X+menu.W/2, menu.Y+menu.H/2)
 			tt.Frame()
 			tt.Scroll(menu.X+menu.W/2, menu.Y+menu.H/2, 0, 10000)
@@ -55,11 +56,11 @@ func TestLongModelOptionsScroll(t *testing.T) {
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				return !s.Threads[0].Configuring && s.Threads[0].Session.Options[0].CurrentValue == "model-99"
 			})
-			click(t, tt, "Set Model")
+			click(t, tt, "Model")
 			tt.Key(0, ui.KeyHome)
 			tt.Frame()
 			first, _ := tt.Find("Fast")
-			menu, _ = tt.Find("Set Model choices")
+			menu, _ = tt.Find("Model choices")
 			if first.Y < menu.Y || first.Y+first.H > menu.Y+menu.H {
 				t.Fatal("keyboard highlight did not scroll into view")
 			}
@@ -68,7 +69,6 @@ func TestLongModelOptionsScroll(t *testing.T) {
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				return !s.Threads[0].Configuring && s.Threads[0].Session.Options[0].CurrentValue == "fast"
 			})
-			click(t, tt, "Close options")
 			usage, ok := tt.Find("Context usage")
 			if !ok {
 				t.Fatal("no persistent usage indicator")
@@ -232,4 +232,122 @@ func waitEcho(t *testing.T, a *app.App, tt *ui.Tester, text string) {
 		v := s.Threads[0]
 		return !v.Running && len(v.Entries) > 0 && v.Entries[len(v.Entries)-1].Text == text
 	})
+}
+
+// Every advertised option is a menu in the composer toolbar, whatever its type,
+// and there is no second place to change them.
+func TestComposerOffersEveryOption(t *testing.T) {
+	a, tt := composerFixture(t, 800, 600)
+	if _, ok := tt.Find("Model"); ok {
+		t.Fatal("options shown before the session exists")
+	}
+	click(t, tt, "Connect session")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+	if _, ok := tt.Find("Connect session"); ok {
+		t.Fatal("still offers to connect a connected session")
+	}
+	click(t, tt, "More thread actions")
+	if tt.ChooseMenuItem("Session options…") == nil {
+		t.Fatal("the options dialog is still offered")
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+	option := func(name string) any {
+		for _, o := range a.Snapshot().Threads[0].Session.Options {
+			if string(o.ID) == name || o.Name == name {
+				return o.CurrentValue
+			}
+		}
+		t.Fatal("no option", name)
+		return nil
+	}
+	if option("enabled") != false {
+		t.Fatal("fixture boolean option", option("enabled"))
+	}
+	click(t, tt, "Optional behavior")
+	click(t, tt, "On")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Configuring && option("enabled") == true })
+	screenshot(t, tt, "composer-options")
+}
+
+// Options beyond what the composer can hold scroll, and the draft and its
+// actions stay in the window.
+func TestManyOptionsStayReachable(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create(fmt.Sprintf("%q session-ui many-options", testutil.Agent(t)), ""); err != nil {
+		t.Fatal(err)
+	}
+	const height = 600
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, height)
+	tt.Frame()
+	click(t, tt, "Connect session")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+	for _, label := range []string{"Message", "Send", "Context usage"} {
+		if r, ok := tt.Find(label); !ok || r.Y < 0 || r.Y+r.H > height {
+			t.Fatalf("%s left the window: %+v", label, r)
+		}
+	}
+	area, ok := tt.Find("Session options")
+	if !ok || area.H > 100 {
+		t.Fatalf("options are not bounded: %+v", area)
+	}
+	last, ok := tt.Find("Optional behavior")
+	if !ok || last.Y < area.Y+area.H {
+		t.Fatalf("expected the last option below the fold: %+v in %+v", last, area)
+	}
+	tt.Scroll(area.X+area.W/2, area.Y+area.H/2, 0, 10000)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	if last, _ = tt.Find("Optional behavior"); last.Y < area.Y || last.Y+last.H > area.Y+area.H+1 {
+		t.Fatalf("the last option is out of reach: %+v in %+v", last, area)
+	}
+	screenshot(t, tt, "composer-many-options")
+	click(t, tt, "Optional behavior")
+	click(t, tt, "On")
+	waitView(t, a, tt, func(s app.Snapshot) bool {
+		options := s.Threads[0].Session.Options
+		return !s.Threads[0].Configuring && options[len(options)-1].CurrentValue == true
+	})
+}
+
+// Permissions yield room to a full composer, so its controls stay in the window,
+// but a long conversation does not squeeze them away.
+func TestComposerKeepsRoomWithPermissions(t *testing.T) {
+	a := testApp(t)
+	id, err := a.Create(fmt.Sprintf("%q session-ui many-options", testutil.Agent(t)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const height = 600
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, height)
+	tt.Frame()
+	send := func(prompt string) {
+		t.Helper()
+		if err := a.Send(id, prompt); err != nil {
+			t.Fatal(err)
+		}
+		waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && !s.Threads[0].Configuring })
+	}
+	for range 3 {
+		send("updates")
+	}
+	send("permission-idle")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 1 })
+	area, ok := tt.Find("Permission requests")
+	if !ok || area.H < 100 {
+		t.Fatalf("a long conversation squeezed the permission: %+v", area)
+	}
+	send("permission-idle")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 2 })
+	click(t, tt, "Tool / protocol details")
+	click(t, tt, "Message")
+	tt.Type(strings.Repeat("a long draft line\n", 12))
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	for _, label := range []string{"Message", "Send", "Context usage"} {
+		if r, ok := tt.Find(label); !ok || r.Y < 0 || r.Y+r.H > height {
+			t.Fatalf("%s left the window: %+v", label, r)
+		}
+	}
+	screenshot(t, tt, "composer-full-with-permissions")
 }

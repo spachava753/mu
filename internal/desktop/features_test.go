@@ -136,7 +136,6 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 				t.Fatal("no way to restore sidebar")
 			}
 			click(t, tt, "Expand sidebar")
-			click(t, tt, "Session options")
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				for _, v := range s.Threads {
 					if v.ID == first {
@@ -145,7 +144,7 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 				}
 				return false
 			})
-			click(t, tt, "Set Model")
+			click(t, tt, "Model")
 			click(t, tt, "Deep")
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				for _, v := range s.Threads {
@@ -159,7 +158,6 @@ func TestMatteSidebarAndSessionControls(t *testing.T) {
 				t.Fatal("dependent reasoning option did not refresh")
 			}
 			screenshot(t, tt, fmt.Sprintf("session-options-%d", size[0]))
-			click(t, tt, "Close options")
 			if err := a.Send(first, "updates"); err != nil {
 				t.Fatal(err)
 			}

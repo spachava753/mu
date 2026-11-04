@@ -24,13 +24,18 @@ func options(model string, enabled bool) []any {
 			models = append(models, map[string]any{"value": fmt.Sprintf("model-%02d", i), "name": fmt.Sprintf("Model %02d", i)})
 		}
 	}
-	return []any{
+	advertised := []any{
 		map[string]any{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": model, "options": []any{
 			map[string]any{"group": "local", "name": "Available models", "options": models},
 		}},
 		map[string]any{"id": "reasoning", "name": "Reasoning", "type": "select", "currentValue": level, "options": []any{map[string]any{"value": level, "name": "Reasoning: " + level}}},
-		map[string]any{"id": "enabled", "name": "Optional behavior", "type": "boolean", "currentValue": enabled},
 	}
+	if slices.Contains(os.Args, "many-options") {
+		for i := range 40 {
+			advertised = append(advertised, map[string]any{"id": fmt.Sprintf("extra-%02d", i), "name": fmt.Sprintf("Extra %02d", i), "type": "boolean", "currentValue": false})
+		}
+	}
+	return append(advertised, map[string]any{"id": "enabled", "name": "Optional behavior", "type": "boolean", "currentValue": enabled})
 }
 func initialState(session string) {
 	commands := []any{map[string]any{"name": "review", "description": "Review the current changes", "input": map[string]any{"hint": "What should be reviewed?"}}}

@@ -12,9 +12,11 @@ import (
 
 // Layout constants shared by the native view and its tests.
 const (
-	sidebarWidth = 232
-	railWidth    = 48
-	readingWidth = 800
+	optionsHeight = 92 // three rows of composer options, and part of a fourth to show there are more
+	statusWidth   = 200
+	sidebarWidth  = 232
+	railWidth     = 48
+	readingWidth  = 800
 )
 
 // The look follows Linear's published approach: a near-monochrome theme
@@ -98,7 +100,6 @@ var (
 	folderPlusIcon = svg(`<path d="M3.5 18V6.5c0-.8.7-1.5 1.5-1.5h4l2 2.5h8c.8 0 1.5.7 1.5 1.5V18c0 .8-.7 1.5-1.5 1.5H5c-.8 0-1.5-.7-1.5-1.5zM12 11v5M9.5 13.5h5"/>`)
 	panelIcon      = svg(`<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>`)
 	plusIcon       = svg(`<path d="M12 5v14M5 12h14"/>`)
-	slidersIcon    = svg(`<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5"/><circle cx="15" cy="17" r="2.5"/>`)
 	gearIcon       = svg(`<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>`)
 	importIcon     = svg(`<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>`)
 	forkIcon       = svg(`<circle cx="6" cy="5.5" r="2.2"/><circle cx="18" cy="5.5" r="2.2"/><circle cx="12" cy="18.5" r="2.2"/><path d="M6 7.7v1.8c0 1.4 1.1 2.5 2.5 2.5h7c1.4 0 2.5-1.1 2.5-2.5V7.7M12 12v4.3"/>`)
@@ -337,16 +338,16 @@ type choice struct{ ID, Name, Description, Group string }
 
 // Keep protocol IDs separate from labels, including duplicate labels and groups.
 func selectChoice(c *ui.Context, label string, value string, options []choice, disabled bool, changed func(string)) {
-	selectControl(c, label, "", value, options, disabled, changed)
+	selectControl(c, label, "", "", value, options, disabled, changed)
 }
 
 // chipSelect is a compact select for toolbars: the field name, muted, then
 // the current value.
-func chipSelect(c *ui.Context, label, field string, value string, options []choice, disabled bool, changed func(string)) {
-	selectControl(c, label, field, value, options, disabled, changed)
+func chipSelect(c *ui.Context, label, field, about string, value string, options []choice, disabled bool, changed func(string)) {
+	selectControl(c, label, field, about, value, options, disabled, changed)
 }
 
-func selectControl(c *ui.Context, label, field string, value string, options []choice, disabled bool, changed func(string)) {
+func selectControl(c *ui.Context, label, field, about string, value string, options []choice, disabled bool, changed func(string)) {
 	t := c.Theme()
 	compact := field != ""
 	selected := value
@@ -363,12 +364,12 @@ func selectControl(c *ui.Context, label, field string, value string, options []c
 	}
 	trigger := s.Trigger.Transition(colorMotion).Label(label).Disabled(disabled).MinWidth(0)
 	if compact {
-		trigger.Height(24).Padding(0, 5, 0, 7).Radius(5).Gap(5).Shrink(1).MaxWidth(220).Tooltip(field + ": " + name)
+		trigger.Height(24).Padding(0, 5, 0, 7).Radius(5).Gap(5).Shrink(1).MaxWidth(220).Tooltip(strings.TrimSpace(field + ": " + name + "\n" + about))
 		if trigger.Hovered() && !disabled {
 			trigger.Background(t.Text.Alpha(0.06))
 		}
 		trigger.Children(func() {
-			ui.Text(c, field).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(0)
+			ui.Text(c, field).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(0).MaxWidth(110)
 			value := ui.Text(c, name).FontSize(12).FontWeight(500).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0)
 			if disabled {
 				value.TextColor(t.TextMuted)

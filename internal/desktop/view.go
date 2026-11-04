@@ -21,7 +21,7 @@ type View struct {
 	importQuery, importNotice            string
 	forkResult                           chan forkResult
 	creating, archived, deleting         bool
-	settingsOpen, sessionOpen, usageOpen bool
+	settingsOpen, usageOpen              bool
 	picker                               commandPicker
 	deleteIDs                            []string
 	selection                            threadSelection
@@ -67,7 +67,7 @@ func New(a *app.App, command string) *View {
 func (v *View) selectThread(id string) {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
-	v.selected, v.creating, v.settingsOpen, v.sessionOpen, v.err = id, false, false, false, ""
+	v.selected, v.creating, v.settingsOpen, v.err = id, false, false, ""
 	v.loadSelected()
 }
 
@@ -82,7 +82,7 @@ func (v *View) loadSelected() {
 func (v *View) openNew() {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
-	v.creating, v.settingsOpen, v.sessionOpen, v.err = true, false, false, ""
+	v.creating, v.settingsOpen, v.err = true, false, ""
 	s := v.app.Snapshot()
 	v.agentID, v.projectID = s.DefaultAgentID, ""
 	// Start in the project of the thread being viewed.
@@ -210,13 +210,6 @@ func (v *View) fork(id string) {
 	v.forkResult = result
 	go func() { id, err := v.app.Fork(id); result <- forkResult{id, err} }()
 }
-func (v *View) openSessionOptions(t app.ThreadView) {
-	v.sessionOpen = true
-	if !t.Archived {
-		v.fail(v.app.Connect(t.ID))
-	}
-}
-
 func (v *View) Draw(c *ui.Context) {
 	if v.forkResult != nil {
 		select {
@@ -302,7 +295,6 @@ func (v *View) Draw(c *ui.Context) {
 			ui.Button(c, remove).TextColor(c.Theme().Danger).OnClick(v.removeThreads)
 		})
 	})
-	v.sessionDialog(c, s)
 	v.renameDialog(c)
 	v.projectDialog(c)
 	v.removeProjectDialog(c, s)
@@ -669,9 +661,6 @@ func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 			if m.Item(reload).Disabled(thread.Archived || busy || thread.SessionID == "").Chosen() {
 				v.fail(v.app.Reload(thread.ID))
 			}
-			if m.Item("Session options…").Disabled(thread.Archived).Chosen() {
-				v.openSessionOptions(thread)
-			}
 			m.Separator()
 			if m.Item("Remove from Mu…").Disabled(busy).Chosen() {
 				v.confirmRemove(thread.ID)
@@ -753,7 +742,7 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 			// Several requests, or a large one, scroll instead of pushing the
 			// composer and Stop out of the window.
 			_, height := c.Size()
-			ui.Scroll(c).Shrink(0).MaxHeight(height * 0.5).Children(func() {
+			ui.Scroll(c).Label("Permission requests").Shrink(1).MinHeight(0).MaxHeight(height * 0.5).Children(func() {
 				for _, p := range thread.Permissions {
 					v.permission(c, thread.ID, p)
 				}
@@ -786,28 +775,35 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					box.BorderColor(hairline(t).Mix(t.Text, 0.18))
 				}
 				ui.Row(c).Padding(0, 6, 6, 7).Gap(2).Children(func() {
-					ui.Row(c).Grow(1).MinWidth(0).Gap(2).ClipX().Children(func() { v.inlineOptions(c, thread) })
-					iconAction(c, "Session options", slidersIcon, false).OnClick(func() { v.openSessionOptions(thread) })
-					if thread.Running || thread.Configuring {
-						status := "Updating session…"
+					// An agent may advertise more options than fit: they scroll, so the
+					// draft and its actions stay in the window. The padding keeps focus
+					// rings clear of the scroll area's clip without moving the chips.
+					ui.Scroll(c.Key("composer-options")).Label("Session options").Grow(1).MinWidth(0).MaxHeight(optionsHeight + 6).Padding(3).Margin(-3).Children(func() {
+						ui.Row(c).Gap(2).Wrap().Children(func() { v.inlineOptions(c, thread) })
+					})
+					// With several rows of options, the actions stay on the last.
+					ui.Row(c).AlignSelf(ui.End).Shrink(0).Gap(2).Children(func() {
+						if thread.Running || thread.Configuring {
+							status := "Updating session…"
+							if thread.Running {
+								status = thread.Status
+							}
+							ui.Spinner(c).Size(13, 13).Label("Agent working").Margin(0, 4, 0, 8)
+							var label ui.Element
+							if agentWorking(thread) {
+								label = shimmerText(c, status, 12, t.TextMuted, t.Text)
+							} else {
+								label = ui.Text(c, status).FontSize(12).TextColor(t.TextMuted)
+							}
+							label.SingleLine().MaxWidth(statusWidth).Margin(0, 6, 0, 0)
+						}
 						if thread.Running {
-							status = thread.Status
-						}
-						ui.Spinner(c).Size(13, 13).Label("Agent working").Margin(0, 4, 0, 8)
-						var label ui.Element
-						if agentWorking(thread) {
-							label = shimmerText(c, status, 12, t.TextMuted, t.Text)
+							roundButton(c, "Stop", stopIcon, false, false).OnClick(func() { v.app.Stop(thread.ID) })
 						} else {
-							label = ui.Text(c, status).FontSize(12).TextColor(t.TextMuted)
+							disabled := thread.Configuring || strings.TrimSpace(*v.draft(thread.ID)) == ""
+							roundButton(c, "Send", sendIcon, true, disabled).OnClick(func() { v.send(thread.ID, *v.draft(thread.ID)) })
 						}
-						label.SingleLine().Shrink(1).MinWidth(0).Margin(0, 6, 0, 0)
-					}
-					if thread.Running {
-						roundButton(c, "Stop", stopIcon, false, false).OnClick(func() { v.app.Stop(thread.ID) })
-					} else {
-						disabled := thread.Configuring || strings.TrimSpace(*v.draft(thread.ID)) == ""
-						roundButton(c, "Send", sendIcon, true, disabled).OnClick(func() { v.send(thread.ID, *v.draft(thread.ID)) })
-					}
+					})
 				})
 			})
 			// The keyboard hint is the first thing to go in a narrow window.
@@ -836,22 +832,46 @@ func roundButton(c *ui.Context, label string, icon *ui.SVG, primary, disabled bo
 	return b
 }
 
-// inlineOptions shows the agent's advertised select options in the composer
-// toolbar. Boolean options and descriptions stay in the session dialog.
+// inlineOptions shows every option the agent advertises as a menu in the
+// composer toolbar, or legacy modes when it advertises none. A new thread has
+// no options until its session exists, so it offers to connect.
 func (v *View) inlineOptions(c *ui.Context, thread app.ThreadView) {
+	if thread.SessionID == "" && !thread.Connected && !thread.Configuring && !thread.Running {
+		quietAction(c, "Connect session", "Connect session", false).Tooltip("Load the options this agent offers. No prompt is sent.").OnClick(func() { v.fail(v.app.Connect(thread.ID)) })
+	}
 	disabled := !thread.Connected || thread.Configuring || thread.Archived
 	for _, o := range thread.Session.Options {
-		if o.Type != acp.SessionConfigOptionTypeSelect {
-			continue
+		about := ""
+		if o.Description != nil {
+			about = *o.Description
 		}
-		choices := selectChoices(o)
 		ui.Box(c.Key("inline-" + string(o.ID))).Shrink(1).MinWidth(0).Children(func() {
-			chipSelect(c, o.Name, o.Name, selectValue(o), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.ID), value)) })
+			switch o.Type {
+			case acp.SessionConfigOptionTypeSelect:
+				choices := selectChoices(o)
+				chipSelect(c, o.Name, o.Name, about, selectValue(o), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.ID), value)) })
+			case acp.SessionConfigOptionTypeBoolean:
+				on, _ := o.CurrentValue.(bool)
+				chipSelect(c, o.Name, o.Name, about, booleanValue(on), booleanChoices, disabled, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.ID), value == booleanValue(true))) })
+			}
 		})
 	}
 	if len(thread.Session.Options) == 0 && thread.Session.Modes != nil {
-		chipSelect(c.Key("inline-mode"), "Mode", "Mode", string(thread.Session.Modes.CurrentModeID), modeChoices(thread.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(thread.ID, value)) })
+		chipSelect(c.Key("inline-mode"), "Mode", "Mode", "", string(thread.Session.Modes.CurrentModeID), modeChoices(thread.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(thread.ID, value)) })
 	}
+	if thread.Connected && !thread.Configuring && len(thread.Session.Options) == 0 && thread.Session.Modes == nil {
+		ui.Text(c, "No session options").FontSize(12).TextColor(faint(c.Theme())).SingleLine().Padding(3, 7)
+	}
+}
+
+// booleanChoices are the menu of a boolean option.
+var booleanChoices = []choice{{ID: booleanValue(true), Name: "On"}, {ID: booleanValue(false), Name: "Off"}}
+
+func booleanValue(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 // selectValue is a select option's current value ID.

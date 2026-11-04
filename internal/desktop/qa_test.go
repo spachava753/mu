@@ -160,9 +160,8 @@ func TestQAThreadControls(t *testing.T) {
 			if !tt.HasText("Send a message to start the agent.") {
 				t.Fatal("empty-thread composer not visible")
 			}
-			click("Session options")
+			click("Connect session")
 			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
-			click("Close options")
 			click("Fork")
 			waitView(t, a, tt, func(s app.Snapshot) bool {
 				for _, thread := range s.Threads {

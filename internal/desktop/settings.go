@@ -11,7 +11,7 @@ import (
 func (v *View) openSettings() {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
-	v.settingsOpen, v.sessionOpen, v.err, v.settingsNotice = true, false, "", ""
+	v.settingsOpen, v.err, v.settingsNotice = true, "", ""
 	s := v.app.Snapshot()
 	v.editAgent = state.AgentConfig{}
 	for _, a := range s.Agents {

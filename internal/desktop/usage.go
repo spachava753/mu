@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/egoist/mygo/ui"
@@ -85,6 +86,15 @@ func (v *View) usageLine(c *ui.Context, thread app.ThreadView, hint bool) {
 				}
 				if s.StopReason != "" {
 					ui.Text(c, "Last stop: "+string(s.StopReason)).FontSize(11.5).TextColor(t.TextMuted)
+				}
+				if s.AgentUpdatedAt != "" {
+					ui.Text(c, "Agent updated: "+s.AgentUpdatedAt).FontSize(11.5).TextColor(t.TextMuted)
+				}
+				if len(s.Metadata) > 0 {
+					smallDisclosure(c, "Agent metadata", v.disclosure("metadata"+thread.ID), func() {
+						b, _ := json.MarshalIndent(s.Metadata, "", "  ")
+						detailText(c, string(b))
+					})
 				}
 			})
 		})

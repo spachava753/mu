@@ -82,9 +82,20 @@ func TestDialogAndMenuAnimate(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+	rawClick(t, tt, "Model")
+	r0, _ := tt.Find("Model choices")
+	tt.Advance(70 * time.Millisecond)
+	r1, _ := tt.Find("Model choices")
+	tt.Advance(200 * time.Millisecond)
+	r2, _ := tt.Find("Model choices")
+	if !(r0.W < r1.W && r1.W < r2.W) {
+		t.Fatalf("menu entrance skipped: %v / %v / %v", r0, r1, r2)
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Advance(200 * time.Millisecond)
 	pixel := func() any { return tt.Image().At(100, 25) }
 	before := pixel()
-	rawClick(t, tt, "Session options")
+	rawClick(t, tt, "New project")
 	start := pixel()
 	tt.Advance(70 * time.Millisecond)
 	middle := pixel()
@@ -93,17 +104,6 @@ func TestDialogAndMenuAnimate(t *testing.T) {
 	if start != before || middle == start || middle == end {
 		t.Fatal("modal did not fade through an intermediate frame", before, start, middle, end)
 	}
-	rawClick(t, tt, "Set Model")
-	r0, _ := tt.Find("Set Model choices")
-	tt.Advance(70 * time.Millisecond)
-	r1, _ := tt.Find("Set Model choices")
-	tt.Advance(200 * time.Millisecond)
-	r2, _ := tt.Find("Set Model choices")
-	if !(r0.W < r1.W && r1.W < r2.W) {
-		t.Fatalf("menu entrance skipped: %v / %v / %v", r0, r1, r2)
-	}
-	tt.Key(0, ui.KeyEscape)
-	tt.Advance(200 * time.Millisecond)
 	tt.Key(0, ui.KeyEscape)
 	tt.Frame()
 	tt.Advance(70 * time.Millisecond)
@@ -146,13 +146,9 @@ func TestRecordMotion(t *testing.T) {
 	frames(12)
 	tt.Key(0, ui.KeyEscape)
 	frames(8)
-	rawClick(t, tt, "Session options")
-	frames(12)
-	rawClick(t, tt, "Set Model")
+	rawClick(t, tt, "Model")
 	frames(12)
 	tt.Key(0, ui.KeyEnd)
-	frames(8)
-	tt.Key(0, ui.KeyEscape)
 	frames(8)
 	tt.Key(0, ui.KeyEscape)
 	frames(12)
