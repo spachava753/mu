@@ -145,6 +145,9 @@ func main() {
 			s := opened(saved)
 			result := setup(s)
 			result["sessionId"] = s.ID
+			if slices.Contains(os.Args, "placeholder-title") {
+				notify(s.ID, map[string]any{"sessionUpdate": "session_info_update", "title": "Untitled session"})
+			}
 			reply(m.ID, result)
 		case "session/list":
 			if slices.Contains(os.Args, "wait-list") {

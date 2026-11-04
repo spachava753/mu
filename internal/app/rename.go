@@ -36,21 +36,31 @@ func (a *App) Rename(id, title string) error {
 		t.Title, t.Renamed = oldTitle, oldRenamed
 		return err
 	}
-	r := a.runtimeLocked(id)
+	a.syncTitleLocked(id, a.runtimeLocked(id), false)
+	return nil
+}
+
+// syncTitleLocked tells the thread's agent its title, if it is running and stores
+// titles. A quiet title is Mu's own idea, from the first message, so an agent
+// refusing it is not worth the user's attention.
+func (a *App) syncTitleLocked(id string, r *runtime, quiet bool) {
+	t := a.threadLocked(id)
+	if t == nil {
+		return
+	}
 	r.titleGeneration++
-	r.titleError = ""
+	r.titleError, r.titleQuiet = "", quiet
 	if r.titleSyncing {
-		return nil // The running worker sends the newest title next.
+		return // The running worker sends the newest title next.
 	}
 	c := a.connections[[2]string{t.AgentID, t.Command}]
 	if t.SessionID == "" || !c.alive() || !c.process.SessionTitles() {
-		return nil
+		return
 	}
-	c.users++ // Released when the worker ends.
-	r.titleSyncing = true
+	c.users++ // Released when the worker ends or the thread detaches.
+	r.titleSyncing, r.titleConn = true, c
 	a.wg.Add(1)
 	go a.storeTitles(c, r, id, t.SessionID)
-	return nil
 }
 
 // storeTitles asks the agent to store the thread's title, one request at a
@@ -59,10 +69,15 @@ func (a *App) Rename(id, title string) error {
 // outcome for the latest title is applied.
 func (a *App) storeTitles(c *connection, r *runtime, id, session string) {
 	defer a.wg.Done()
-	defer a.release(c)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	defer func() { r.titleSyncing = false }()
+	defer func() {
+		r.titleSyncing = false
+		if r.titleConn != nil {
+			r.titleConn = nil
+			a.releaseLocked(c)
+		}
+	}()
 	for {
 		t := a.threadLocked(id)
 		if t == nil || a.closed {
@@ -79,6 +94,9 @@ func (a *App) storeTitles(c *connection, r *runtime, id, session string) {
 			continue
 		}
 		if err != nil {
+			if r.titleQuiet {
+				return
+			}
 			r.titleError = fmt.Sprintf("The title was kept in Mu, but the agent did not store it: %v", c.process.Error(err))
 		} else if stored != "" && stored != title {
 			t.Title = stored

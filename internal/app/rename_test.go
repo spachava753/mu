@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -156,7 +157,6 @@ func TestRenameToSameTitleChangesNothing(t *testing.T) {
 	command := testutil.Agent(t)
 	a := openTest(t, t.TempDir())
 	id := createTest(t, a, command)
-	before := len(fixtureCalls(t, command))
 	if err := a.Rename(id, " New  thread "); err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +166,167 @@ func TestRenameToSameTitleChangesNothing(t *testing.T) {
 	if v := sendDone(t, a, id, "hello"); v.Title != "hello" {
 		t.Fatalf("first message did not name the thread: %q", v.Title)
 	}
-	if calls := fixtureCalls(t, command)[before:]; slices.Contains(calls, "session/set_title") {
-		t.Fatalf("unchanged title reached the agent: %v", calls)
+	// The only title the agent hears is the one from that message, not the rename.
+	if titles := fixtureTitles(t, command); slices.Contains(titles, "New thread") {
+		t.Fatalf("unchanged title reached the agent: %v", titles)
+	}
+}
+
+// fixtureTitles lists the titles the fixture was asked to store, in order, after
+// waiting a moment for requests still on their way.
+func fixtureTitles(t *testing.T, command string) []string {
+	t.Helper()
+	time.Sleep(100 * time.Millisecond)
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(command), "fixture-sessions", "calls.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var titles []string
+	for _, line := range strings.Split(string(b), "\n") {
+		var m struct {
+			Method string `json:"method"`
+			Params struct {
+				Title string `json:"title"`
+			} `json:"params"`
+		}
+		if json.Unmarshal([]byte(line), &m) == nil && m.Method == "session/set_title" {
+			titles = append(titles, m.Params.Title)
+		}
+	}
+	return titles
+}
+
+// The first message names a thread and its session, whatever placeholder the
+// agent gave the empty session. It is the only message that does.
+func TestFirstMessageNamesSession(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command+" placeholder-title")
+	connected(t, a, id)
+	await(t, a, id, func(v ThreadView) bool { return v.Title == "Untitled session" })
+
+	v := sendDone(t, a, id, "fix  the\nbug")
+	if v.Title != "fix the bug" || v.Renamed {
+		t.Fatalf("title %q renamed=%v", v.Title, v.Renamed)
+	}
+	if titles := fixtureTitles(t, command); !slices.Equal(titles, []string{"fix the bug"}) {
+		t.Fatalf("the agent was told %q", titles)
+	}
+	if v := sendDone(t, a, id, "second message"); v.Title != "fix the bug" {
+		t.Fatalf("a later message renamed the thread: %q", v.Title)
+	}
+	if titles := fixtureTitles(t, command); len(titles) != 1 {
+		t.Fatalf("the agent was told %q", titles)
+	}
+
+	// A loaded session already has messages, so its title stays.
+	if err := a.Reload(id); err != nil {
+		t.Fatal(err)
+	}
+	connected(t, a, id)
+	if v := sendDone(t, a, id, "after reload"); v.Title != "fix the bug" {
+		t.Fatalf("a message after reload renamed the thread: %q", v.Title)
+	}
+}
+
+// A message sent before the session exists names it too, once it does, even if
+// setting the session up brought a placeholder.
+func TestFirstMessageNamesSessionItStarts(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command+" placeholder-title")
+	if v := sendDone(t, a, id, "hello"); v.Title != "hello" {
+		t.Fatalf("title %q", v.Title)
+	}
+	if titles := fixtureTitles(t, command); !slices.Equal(titles, []string{"hello"}) {
+		t.Fatalf("the agent was told %q", titles)
+	}
+}
+
+// A title the agent came up with during the turn stays, on both sides.
+func TestFirstMessageLeavesAgentsOwnTitle(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command+" session-ui")
+	connected(t, a, id)
+	if v := sendDone(t, a, id, "updates"); v.Title != "Session controls and usage" {
+		t.Fatalf("title %q", v.Title)
+	}
+	if titles := fixtureTitles(t, command); len(titles) != 0 {
+		t.Fatalf("overwrote the agent's title with %q", titles)
+	}
+}
+
+// A rename while the first message connects is the user's: it stays, and a
+// refusal is shown.
+func TestRenameDuringFirstMessageStaysLoud(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, testutil.Agent(t)+" slow-new title-error")
+	if err := a.Send(id, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Rename(id, "Refused title"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, id, func(v ThreadView) bool { return !v.Running })
+	if v := findThread(t, a, id); v.Title != "Refused title" {
+		t.Fatalf("title %q", v.Title)
+	}
+	if err := a.Rename(id, "Refused again"); err != nil {
+		t.Fatal(err)
+	}
+	await(t, a, id, func(v ThreadView) bool { return v.TitleError != "" })
+}
+
+// An agent that never answers a title request cannot keep its process alive after
+// the thread that needed it is gone.
+func TestUnansweredTitleDoesNotKeepProcess(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, testutil.Agent(t)+" wait-title")
+	connected(t, a, id)
+	sendDone(t, a, id, "hello")
+	await(t, a, id, func(v ThreadView) bool { return v.Title == "hello" })
+	time.Sleep(50 * time.Millisecond) // The title request is on its way.
+	if err := a.Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for connectionCount(a) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the process outlived its last thread")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A title the user chose is not replaced by the first message.
+func TestFirstMessageKeepsChosenTitle(t *testing.T) {
+	command := testutil.Agent(t)
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, command)
+	connected(t, a, id)
+	if err := a.Rename(id, "Chosen"); err != nil {
+		t.Fatal(err)
+	}
+	if v := sendDone(t, a, id, "hello"); v.Title != "Chosen" {
+		t.Fatalf("title %q", v.Title)
+	}
+	if titles := fixtureTitles(t, command); slices.Contains(titles, "hello") {
+		t.Fatalf("the agent was told %q", titles)
+	}
+}
+
+// An agent refusing a title Mu chose is not the user's problem.
+func TestRefusedFirstMessageTitleIsQuiet(t *testing.T) {
+	a := openTest(t, t.TempDir())
+	id := createTest(t, a, testutil.Agent(t)+" title-error")
+	connected(t, a, id)
+	if v := sendDone(t, a, id, "Refused title"); v.Title != "Refused title" {
+		t.Fatalf("title %q", v.Title)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if v := findThread(t, a, id); v.TitleError != "" {
+		t.Fatalf("shown an error for a title the user did not choose: %q", v.TitleError)
 	}
 }
 

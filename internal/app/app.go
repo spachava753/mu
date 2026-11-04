@@ -96,6 +96,7 @@ type job struct {
 	stopping   bool
 	promptDone chan struct{}
 	stopDone   chan struct{}
+	title      string // the title this prompt gave the thread, if any
 }
 type runtime struct {
 	Conversation
@@ -120,8 +121,10 @@ type runtime struct {
 	configuring                  bool
 	sessionError                 string
 	titleError                   string
-	titleGeneration              uint64 // counts the user's renames
-	titleSyncing                 bool   // a worker is storing titles with the agent
+	titleGeneration              uint64      // counts the titles to store
+	titleSyncing                 bool        // a worker is storing titles with the agent
+	titleQuiet                   bool        // the latest title is not the user's, so a refusal goes unsaid
+	titleConn                    *connection // the worker's hold on the connection, until the thread detaches
 	configCancel                 context.CancelFunc
 	echo                         promptEcho
 }
@@ -439,12 +442,14 @@ func (a *App) Send(id, text string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	j := &job{ctx: ctx, cancel: cancel, done: make(chan struct{}), promptDone: make(chan struct{})}
 	before := *t.Thread
-	if t.Title == "New thread" && !t.Renamed {
+	// The first message names the thread, whatever placeholder the agent gave a
+	// session that has nothing in it yet. A title the user chose stays.
+	if !t.Renamed && (t.Title == "New thread" || (r.live() && len(r.Entries) == 0)) {
 		title := []rune(strings.Join(strings.Fields(text), " "))
 		if len(title) > 60 {
 			title = append(title[:59], '…')
 		}
-		t.Title = string(title)
+		t.Title, j.title = string(title), string(title)
 	}
 	t.Running, t.Updated = true, time.Now()
 	if err := a.saveLocked(); err != nil {
@@ -469,6 +474,11 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	defer close(j.done)
 	p, err := a.connect(j.ctx, t, r)
 	a.mu.Lock()
+	if current := a.threadLocked(t.ID); err == nil && j.title != "" && current != nil && !current.Renamed && current.Title != j.title {
+		// Setting up the session may have replaced it with the agent's placeholder.
+		current.Title, a.dirty = j.title, true
+		a.notifyLocked()
+	}
 	local := state.Entry{ID: state.ID(), Role: "user", Text: text}
 	r.Entries = append(r.Entries, local)
 	before := len(r.Entries)
@@ -528,6 +538,11 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 		// process is gone or Mu abandoned the request, as after Stop's deadline.
 		if err != nil && p != nil && (!p.Alive() || j.ctx.Err() != nil) {
 			a.detachLocked(r)
+		}
+		// Tell the agent only now, so that this cannot overwrite a title it came up
+		// with during the turn. If it did, Mu shows that one instead.
+		if j.title != "" && !current.Renamed && current.Title == j.title && r.live() {
+			a.syncTitleLocked(t.ID, r, true)
 		}
 		_ = a.saveLocked()
 	}
@@ -869,7 +884,12 @@ func (a *App) Answer(id, permissionID string, option acp.PermissionOptionId) {
 // Shutdown joins the detached work.
 func (a *App) detachLocked(r *runtime) {
 	c, session := r.conn, r.session
+	title := r.titleConn // An unanswered title request must not keep the process.
+	r.titleConn = nil
 	if c == nil {
+		if title != nil {
+			a.releaseLocked(title)
+		}
 		return
 	}
 	r.conn, r.session, r.acceptUpdates = nil, "", false
@@ -889,6 +909,9 @@ func (a *App) detachLocked(r *runtime) {
 		defer a.wg.Done()
 		err := c.process.CloseSession(session, deadline)
 		a.mu.Lock()
+		if title != nil {
+			a.releaseLocked(title)
+		}
 		a.releaseLocked(c) // A reconnect also waits for any process it stops.
 		if err != nil {
 			r.sessionError = err.Error()
