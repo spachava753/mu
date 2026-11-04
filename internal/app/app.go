@@ -20,6 +20,7 @@ import (
 	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
+	"github.com/spachava753/mu/internal/workspace"
 )
 
 // Permission is a pending session/request_permission. Request is never
@@ -63,6 +64,7 @@ type ThreadView struct {
 	Connected    bool
 	Configuring  bool
 	SessionError string
+	Git          workspace.Git // as last read, while the thread was in view
 }
 
 type Snapshot struct {
@@ -145,6 +147,9 @@ type App struct {
 	runtimes        map[string]*runtime
 	changed         chan struct{}
 	stopWriter      chan struct{}
+	focused         string                   // the thread in view
+	workspaces      map[string]workspace.Git // the last reading of each folder
+	workspaceWake   chan struct{}
 	wg              sync.WaitGroup
 	closed          bool
 	dirty           bool
@@ -181,8 +186,10 @@ func Open(dir, defaultWorkingDir string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{})}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1)}
 	a.ctx, a.cancelCtx = context.WithCancel(context.Background())
+	a.wg.Add(1)
+	go a.watchWorkspace()
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -249,7 +256,7 @@ func (a *App) Snapshot() Snapshot {
 	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
 	for _, t := range a.data.Threads {
 		t.AdditionalDirectories = slices.Clone(t.AdditionalDirectories)
-		v := ThreadView{Thread: t}
+		v := ThreadView{Thread: t, Git: a.workspaces[t.Cwd]}
 		if r := a.runtimes[t.ID]; r != nil {
 			v.Conversation = r.Conversation
 			v.Entries = slices.Clone(r.Entries)
@@ -451,6 +458,7 @@ func (a *App) Send(id, text string) error {
 
 func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	defer a.wg.Done()
+	defer a.wakeWorkspace() // The turn may have changed the folder.
 	defer j.cancel()
 	defer close(j.done)
 	p, err := a.connect(j.ctx, t, r)

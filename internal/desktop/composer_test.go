@@ -2,6 +2,8 @@ package desktop_test
 
 import (
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/desktop"
+	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/testutil"
 )
 
@@ -350,4 +353,83 @@ func TestComposerKeepsRoomWithPermissions(t *testing.T) {
 		}
 	}
 	screenshot(t, tt, "composer-full-with-permissions")
+}
+
+// Below the composer: the thread's branch, its worktree folder if it is a linked
+// one, and nothing outside a repository.
+func TestGitLine(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			a := testApp(t)
+			id, err := a.Create(testutil.Agent(t), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := a.Snapshot().Threads[0].Cwd
+			tt := ui.NewTester(desktop.New(a, "").Draw, size[0], size[1])
+			tt.Frame()
+			if _, ok := tt.Find("Git branch: feature/resize"); ok {
+				t.Fatal("git line outside a repository")
+			}
+			git(dir, "init", "-q", "-b", "feature/resize")
+			git(dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "one")
+			if err := a.Send(id, "hello"); err != nil { // The end of the turn reads the folder.
+				t.Fatal(err)
+			}
+			waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Git.Branch == "feature/resize" && !s.Threads[0].Running })
+			line, ok := tt.Find("Git branch: feature/resize")
+			if !ok {
+				t.Fatal("no git line", tt.Texts())
+			}
+			usage, _ := tt.Find("Context usage")
+			if line.Y < usage.Y+usage.H-1 || line.Y+line.H > float32(size[1]) {
+				t.Fatalf("git line %+v is not below usage %+v in the window", line, usage)
+			}
+			screenshot(t, tt, fmt.Sprintf("git-line-%d", size[0]))
+
+			// A linked worktree also shows its folder, in a project of its own.
+			linked := filepath.Join(t.TempDir(), "mu-resize")
+			git(dir, "worktree", "add", "-q", "-b", "side", linked)
+			project, err := a.SaveProject(state.Project{Name: "Linked", Dir: linked})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := a.Create(testutil.Agent(t), project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.Frame()
+			click(t, tt, "Thread: "+threadTitle(t, a, second))
+			waitView(t, a, tt, func(s app.Snapshot) bool { return threadView(s, second).Git.Worktree != "" })
+			if _, ok := tt.Find("Worktree: " + linked); !ok || !tt.HasText("mu-resize") || !tt.HasText("side") {
+				t.Fatal("no worktree folder", tt.Texts())
+			}
+			screenshot(t, tt, fmt.Sprintf("git-line-worktree-%d", size[0]))
+		})
+	}
+}
+
+func threadView(s app.Snapshot, id string) app.ThreadView {
+	for _, v := range s.Threads {
+		if v.ID == id {
+			return v
+		}
+	}
+	return app.ThreadView{}
+}
+
+func threadTitle(t *testing.T, a *app.App, id string) string {
+	t.Helper()
+	return threadView(a.Snapshot(), id).Title
 }

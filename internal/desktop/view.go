@@ -22,6 +22,7 @@ type View struct {
 	forkResult                           chan forkResult
 	creating, archived, deleting         bool
 	settingsOpen, usageOpen              bool
+	focused                              string // the thread the app was last told is in view
 	drag                                 sidebarDrag
 	springing                            bool
 	sidebarShown                         float32 // as of the last frame
@@ -226,6 +227,10 @@ func (v *View) Draw(c *ui.Context) {
 			v.fail(result.err)
 		default:
 		}
+	}
+	if v.focused != v.selected {
+		v.focused = v.selected
+		v.app.FocusThread(v.selected)
 	}
 	matte(c)
 	if v.selection.active() && !v.deleting && !v.renaming && !v.projects.open && !v.projects.removing {
@@ -766,6 +771,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					ui.Button(c, "Restore thread").OnClick(func() { v.archive(thread) })
 				})
 				v.usageLine(c, thread, false)
+				gitLine(c, thread.Git)
 				return
 			}
 			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(8).Border(1, hairline(t)).Background(t.Surface)
@@ -807,6 +813,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 			})
 			// The keyboard hint is the first thing to go in a narrow window.
 			v.usageLine(c, thread, box.Bounds().W >= 600)
+			gitLine(c, thread.Git)
 		})
 	})
 }
