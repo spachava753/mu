@@ -106,3 +106,21 @@ func TestSettingsSaveFailureRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSidebarLayoutPersists(t *testing.T) {
+	dir := t.TempDir()
+	a := openTest(t, dir)
+	if s := a.Snapshot(); s.SidebarWidth != 0 || s.SidebarCollapsed {
+		t.Fatalf("fresh sidebar: %v %v", s.SidebarWidth, s.SidebarCollapsed)
+	}
+	if err := a.SetSidebar(310, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a = openTest(t, dir)
+	if s := a.Snapshot(); s.SidebarWidth != 310 || !s.SidebarCollapsed {
+		t.Fatalf("reopened sidebar: %v %v", s.SidebarWidth, s.SidebarCollapsed)
+	}
+}

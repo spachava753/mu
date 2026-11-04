@@ -75,6 +75,282 @@ func TestSidebarAnimationAndReversal(t *testing.T) {
 	}
 }
 
+// dragSidebar presses the sidebar's edge and returns a function that moves the
+// pointer to a window position, and one that lets go there.
+func dragSidebar(t *testing.T, tt *ui.Tester) (move, release func(x float32)) {
+	t.Helper()
+	edge, ok := tt.Find("Resize sidebar")
+	if !ok {
+		t.Fatal("missing sidebar handle")
+	}
+	y := edge.Y + edge.H/2
+	tt.Move(edge.X+edge.W/2, y)
+	tt.Press(edge.X+edge.W/2, y)
+	// The press starts where the sidebar's edge is, so widths read as positions.
+	offset := edge.X + edge.W/2 - (edge.X + edge.W)
+	return func(x float32) { tt.Move(x+offset, y); tt.Frame() }, func(x float32) { tt.Release(x+offset, y); tt.Frame() }
+}
+
+func TestSidebarDrag(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create("unused-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	v := desktop.New(a, "")
+	tt := ui.NewTester(v.Draw, 800, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+
+	// The edge stays under the pointer, and the width saves on release.
+	move, release := dragSidebar(t, tt)
+	move(300)
+	if got := sidebarWidth(t, tt); got != 300 {
+		t.Fatalf("width %v does not follow the pointer", got)
+	}
+	if a.Snapshot().SidebarWidth != 0 {
+		t.Fatal("saved before release")
+	}
+	screenshot(t, tt, "sidebar-drag-300")
+	// Up to half the window, however far the pointer goes.
+	move(700)
+	if got := sidebarWidth(t, tt); got != 400 {
+		t.Fatalf("width %v passes half the window", got)
+	}
+	screenshot(t, tt, "sidebar-drag-half")
+	// At the minimum, it waits for the snap point.
+	move(190)
+	if got := sidebarWidth(t, tt); got != 216 {
+		t.Fatalf("width %v passes the minimum", got)
+	}
+	screenshot(t, tt, "sidebar-drag-min")
+	move(260)
+	release(260)
+	if got := a.Snapshot(); got.SidebarWidth != 260 || got.SidebarCollapsed {
+		t.Fatalf("saved %v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+
+	// Past the snap point it springs to the rail: through frames in between,
+	// past the rail and back. Nothing saves until release.
+	move, release = dragSidebar(t, tt)
+	move(216)
+	move(120)
+	var widths []float32
+	for range 30 {
+		tt.Advance(16 * time.Millisecond)
+		widths = append(widths, sidebarWidth(t, tt))
+	}
+	if widths[3] <= 48 || widths[3] >= 216 {
+		t.Fatalf("snap did not animate: %v", widths[:4])
+	}
+	lowest := widths[0]
+	for _, w := range widths {
+		lowest = min(lowest, w)
+	}
+	if lowest >= 48 {
+		t.Fatalf("snap has no spring: %v", widths)
+	}
+	tt.Advance(500 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 48 {
+		t.Fatalf("snap settled at %v", got)
+	}
+	screenshot(t, tt, "sidebar-drag-snapped")
+	if a.Snapshot().SidebarCollapsed {
+		t.Fatal("collapse saved before release")
+	}
+	// Changing course springs back out, and then follows the pointer again.
+	move(300)
+	tt.Advance(60 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got <= 48 || got >= 300 {
+		t.Fatalf("expanding again did not animate: %v", got)
+	}
+	tt.Advance(600 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 300 {
+		t.Fatalf("expanded to %v", got)
+	}
+	move(320)
+	if got := sidebarWidth(t, tt); got != 320 {
+		t.Fatalf("stopped following at %v", got)
+	}
+	move(100)
+	tt.Advance(600 * time.Millisecond)
+	release(100)
+	got := a.Snapshot()
+	if !got.SidebarCollapsed || got.SidebarWidth != 260 {
+		t.Fatalf("snapped release: width=%v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+
+	// The collapse button brings back the saved width.
+	click(t, tt, "Expand sidebar")
+	tt.Advance(300 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 260 || a.Snapshot().SidebarCollapsed {
+		t.Fatalf("expanded to %v", got)
+	}
+
+	// So does dragging the rail's edge.
+	click(t, tt, "Collapse sidebar")
+	tt.Advance(300 * time.Millisecond)
+	move, release = dragSidebar(t, tt)
+	move(280)
+	tt.Advance(600 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 280 {
+		t.Fatalf("rail dragged to %v", got)
+	}
+	release(280)
+	if got := a.Snapshot(); got.SidebarWidth != 280 || got.SidebarCollapsed {
+		t.Fatalf("rail drag saved %v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+
+	// A narrower window limits the width without forgetting it.
+	move, release = dragSidebar(t, tt)
+	move(400)
+	release(400)
+	tt.SetSize(600, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 300 {
+		t.Fatalf("width %v in a 600 window", got)
+	}
+	if a.Snapshot().SidebarWidth != 400 {
+		t.Fatal("a smaller window overwrote the saved width")
+	}
+	tt.SetSize(800, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 400 {
+		t.Fatalf("width %v after the window grew back", got)
+	}
+
+	// With reduced motion the snap has no frames in between.
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	move, release = dragSidebar(t, tt)
+	move(100)
+	if got := sidebarWidth(t, tt); got != 48 {
+		t.Fatalf("reduced motion snap at %v", got)
+	}
+	release(100)
+}
+
+// A drag ends where the pointer lets go, even if it moved no earlier.
+func TestSidebarDragFinishesAtRelease(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create("unused-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	move, release := dragSidebar(t, tt)
+	move(300)
+	release(350)
+	if got := a.Snapshot(); got.SidebarWidth != 350 || got.SidebarCollapsed {
+		t.Fatalf("released at 350: saved %v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+	// The whole movement can come with the release.
+	_, release = dragSidebar(t, tt)
+	release(280)
+	if got := a.Snapshot(); got.SidebarWidth != 280 {
+		t.Fatalf("released at 280: saved %v", got.SidebarWidth)
+	}
+	// So can crossing the snap point, and the width stays saved for later.
+	move, release = dragSidebar(t, tt)
+	move(190)
+	release(120)
+	if got := a.Snapshot(); got.SidebarWidth != 280 || !got.SidebarCollapsed {
+		t.Fatalf("released past the snap point: saved %v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+}
+
+// Losing the press, as when the window loses focus, abandons the drag.
+func TestSidebarDragCancelledByFocusLoss(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create("unused-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	move, _ := dragSidebar(t, tt)
+	move(300)
+	tt.SetFocused(false)
+	tt.SetFocused(true)
+	tt.Frame()
+	tt.Advance(600 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 232 {
+		t.Fatalf("width %v after the drag was lost", got)
+	}
+	if got := a.Snapshot(); got.SidebarWidth != 0 || got.SidebarCollapsed {
+		t.Fatalf("a lost drag saved: %v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+	click(t, tt, "Collapse sidebar")
+	tt.Advance(300 * time.Millisecond)
+	if got := sidebarWidth(t, tt); got != 48 {
+		t.Fatalf("collapse after a lost drag left %v", got)
+	}
+}
+
+// The spring keeps the sidebar within the half-window limit, and a fast drag
+// does not carry it away past the rail.
+func TestSidebarSpringStaysInBounds(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create("unused-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	check := func(frames int) {
+		t.Helper()
+		for range frames {
+			tt.Advance(16 * time.Millisecond)
+			if got := sidebarWidth(t, tt); got > 400 || got < 42 {
+				t.Fatalf("width %v left its bounds", got)
+			}
+		}
+	}
+	move, release := dragSidebar(t, tt)
+	for _, x := range []float32{220, 150, 80, 20} {
+		move(x)
+		check(1)
+	}
+	check(40)
+	move(400)
+	check(40)
+	if got := sidebarWidth(t, tt); got != 400 {
+		t.Fatalf("expanded to %v", got)
+	}
+	release(400)
+}
+
+// Grabbing the edge while it animates continues from where it shows.
+func TestSidebarDragTakesOverAnimation(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.Create("unused-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetSidebar(400, false); err != nil {
+		t.Fatal(err)
+	}
+	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt.Frame()
+	tt.Advance(300 * time.Millisecond)
+	rawClick(t, tt, "Collapse sidebar")
+	tt.Advance(70 * time.Millisecond)
+	tt.Frame() // Bring the frame up to the clock, so that the pointer finds the edge.
+	shown := sidebarWidth(t, tt)
+	if shown <= 216 || shown >= 400 {
+		t.Fatalf("not partway: %v", shown)
+	}
+	move, release := dragSidebar(t, tt)
+	move(shown + 20)
+	if got := sidebarWidth(t, tt); got != shown+20 {
+		t.Fatalf("the edge jumped from %v to %v", shown, got)
+	}
+	release(shown + 20)
+	if got := a.Snapshot(); got.SidebarCollapsed || got.SidebarWidth != shown+20 {
+		t.Fatalf("saved %v collapsed=%v", got.SidebarWidth, got.SidebarCollapsed)
+	}
+}
+
 func TestDialogAndMenuAnimate(t *testing.T) {
 	a, tt := composerFixture(t, 800, 600)
 	// Prepare the session so asynchronous setup cannot affect animation samples.

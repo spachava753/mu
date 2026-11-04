@@ -112,6 +112,23 @@ func (a *App) SetSidebarCollapsed(collapsed bool) error {
 	return nil
 }
 
+// SetSidebar saves the sidebar's width and whether it is collapsed, as a drag
+// of its edge leaves them. The view decides what fits its window.
+func (a *App) SetSidebar(width float32, collapsed bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return errors.New("app is closing")
+	}
+	oldWidth, oldCollapsed := a.data.SidebarWidth, a.data.SidebarCollapsed
+	a.data.SidebarWidth, a.data.SidebarCollapsed = width, collapsed
+	if err := a.saveLocked(); err != nil {
+		a.data.SidebarWidth, a.data.SidebarCollapsed = oldWidth, oldCollapsed
+		return err
+	}
+	return nil
+}
+
 // SetWorkingDirectory sets the general working directory. Existing threads
 // keep their folders; only new threads are created in the new location.
 func (a *App) SetWorkingDirectory(dir string) error {

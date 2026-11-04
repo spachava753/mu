@@ -89,6 +89,7 @@ type Data struct {
 	Projects         []Project     `json:"projects,omitempty"`
 	DefaultAgentID   string        `json:"defaultAgentId,omitempty"`
 	SidebarCollapsed bool          `json:"sidebarCollapsed,omitempty"`
+	SidebarWidth     float32       `json:"sidebarWidth,omitempty"`
 	LastCommand      string        `json:"lastCommand,omitempty"`
 	WorkingDirectory string        `json:"workingDirectory,omitempty"`
 	Threads          []Thread      `json:"threads"`

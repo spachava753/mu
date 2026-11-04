@@ -72,6 +72,7 @@ type Snapshot struct {
 	Projects                  []state.Project
 	DefaultAgentID            string
 	SidebarCollapsed          bool
+	SidebarWidth              float32 // 0 until the user resizes the sidebar
 	Threads                   []ThreadView
 	LastCommand, StorageError string
 	WorkingDirectory          string
@@ -245,7 +246,7 @@ func (a *App) runtimeLocked(id string) *runtime {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed}
+	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
 	for _, t := range a.data.Threads {
 		t.AdditionalDirectories = slices.Clone(t.AdditionalDirectories)
 		v := ThreadView{Thread: t}

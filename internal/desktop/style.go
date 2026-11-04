@@ -14,8 +14,6 @@ import (
 const (
 	optionsHeight = 92 // three rows of composer options, and part of a fourth to show there are more
 	statusWidth   = 200
-	sidebarWidth  = 232
-	railWidth     = 48
 	readingWidth  = 800
 )
 

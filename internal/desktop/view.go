@@ -22,6 +22,9 @@ type View struct {
 	forkResult                           chan forkResult
 	creating, archived, deleting         bool
 	settingsOpen, usageOpen              bool
+	drag                                 sidebarDrag
+	springing                            bool
+	sidebarShown                         float32 // as of the last frame
 	picker                               commandPicker
 	deleteIDs                            []string
 	selection                            threadSelection
@@ -303,18 +306,14 @@ func (v *View) Draw(c *ui.Context) {
 
 func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 	t := c.Theme()
-	target := float32(sidebarWidth)
-	if s.SidebarCollapsed {
-		target = railWidth
-	}
 	sidebar := ui.Column(c.Key("sidebar")).Label("Thread sidebar").Shrink(0).ClipX()
-	width := sidebar.AnimateTo("width", target, sidebarMotion)
-	sidebar.Width(width).Children(func() {
+	sidebar.Children(func() {
+		width, collapsed := v.sidebarHandle(c, sidebar, s)
 		toggle := func() {
 			v.selection.clear() // The rail has no way to show or act on it.
 			v.fail(v.app.SetSidebarCollapsed(!s.SidebarCollapsed))
 		}
-		if s.SidebarCollapsed {
+		if collapsed {
 			ui.Column(c.Key("rail")).Width(railWidth-1).Grow(1).AlignItems(ui.Center).Padding(10, 0).Gap(4).Transition(fadeMotion).Children(func() {
 				iconButton(c, "Expand sidebar", panelIcon).OnClick(toggle)
 				ui.Box(c).Height(8)
@@ -326,7 +325,7 @@ func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
 			})
 			return
 		}
-		ui.Column(c.Key("thread-list")).Width(sidebarWidth - 1).Grow(1).MinHeight(0).Transition(fadeMotion).Children(func() {
+		ui.Column(c.Key("thread-list")).Width(width - 1).Grow(1).MinHeight(0).Transition(fadeMotion).Children(func() {
 			ui.Row(c).Height(52).Shrink(0).Padding(0, 10, 0, 18).Gap(2).Children(func() {
 				ui.Text(c, "mu").FontSize(14).FontWeight(600).Grow(1).MinWidth(0).SingleLine()
 				iconButton(c, "New thread", plusIcon).OnClick(v.openNew)
