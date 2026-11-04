@@ -92,6 +92,7 @@ func (v *View) openNew() {
 		}
 	}
 }
+
 // openNewIn opens the new-thread form with a project chosen.
 func (v *View) openNewIn(projectID string) {
 	v.openNew()
@@ -492,9 +493,13 @@ func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView, o
 				}
 				meta = joinNonEmpty(" · ", agent, folder, timeLabel(thread.Updated))
 			}
-			text := ui.Text(c, meta).FontSize(11.5).TextColor(faint(t)).SingleLine()
-			if status != "" && color != t.TextMuted {
-				text.TextColor(color)
+			if agentWorking(thread) {
+				shimmerText(c, meta, 11.5, color, color.Mix(t.Text, 0.6)).SingleLine()
+			} else {
+				text := ui.Text(c, meta).FontSize(11.5).TextColor(faint(t)).SingleLine()
+				if status != "" && color != t.TextMuted {
+					text.TextColor(color)
+				}
 			}
 		})
 	}).OnClick(func() {
@@ -789,7 +794,13 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 							status = thread.Status
 						}
 						ui.Spinner(c).Size(13, 13).Label("Agent working").Margin(0, 4, 0, 8)
-						ui.Text(c, status).FontSize(12).TextColor(t.TextMuted).SingleLine().Shrink(1).MinWidth(0).Margin(0, 6, 0, 0)
+						var label ui.Element
+						if agentWorking(thread) {
+							label = shimmerText(c, status, 12, t.TextMuted, t.Text)
+						} else {
+							label = ui.Text(c, status).FontSize(12).TextColor(t.TextMuted)
+						}
+						label.SingleLine().Shrink(1).MinWidth(0).Margin(0, 6, 0, 0)
 					}
 					if thread.Running {
 						roundButton(c, "Stop", stopIcon, false, false).OnClick(func() { v.app.Stop(thread.ID) })

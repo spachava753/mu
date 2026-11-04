@@ -1,18 +1,21 @@
 package desktop_test
 
 import (
+	"fmt"
 	"image"
 	"image/color/palette"
 	"image/draw"
 	"image/gif"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/desktop"
+	"github.com/spachava753/mu/internal/testutil"
 )
 
 func rawClick(t *testing.T, tt *ui.Tester, label string) {
@@ -163,5 +166,66 @@ func TestRecordMotion(t *testing.T) {
 	defer f.Close()
 	if err := gif.EncodeAll(f, animation); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// While an agent works, its status text shimmers: frames differ only in color,
+// the text stays put, and it stops with the turn. With reduced motion it is
+// still.
+func TestWorkingTextShimmers(t *testing.T) {
+	for _, reduced := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reduced=%v", reduced), func(t *testing.T) {
+			a := testApp(t)
+			id, err := a.Create(testutil.Agent(t), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			view := desktop.New(a, "")
+			tt := ui.NewTester(view.Draw, 1100, 780)
+			tt.SetPreferences(ui.Preferences{ReduceMotion: reduced})
+			tt.Frame()
+			if err := a.Send(id, "wait"); err != nil {
+				t.Fatal(err)
+			}
+			waitView(t, a, tt, func(s app.Snapshot) bool {
+				th := s.Threads[0]
+				return th.Running && th.Status == "Working…" && len(th.Entries) > 1
+			})
+			box, ok := tt.Find("Working…")
+			if !ok {
+				t.Fatal("no working text", tt.Texts())
+			}
+			crop := func() string {
+				img := tt.Image()
+				var b strings.Builder
+				for y := int(box.Y); y < int(box.Y+box.H); y++ {
+					for x := int(box.X); x < int(box.X+box.W); x++ {
+						c := img.RGBAAt(x, y)
+						fmt.Fprintf(&b, "%d,%d,%d;", c.R, c.G, c.B)
+					}
+				}
+				return b.String()
+			}
+			frames := map[string]bool{}
+			for i := range 12 {
+				tt.Advance(150 * time.Millisecond)
+				frames[crop()] = true
+				if moved, ok := tt.Find("Working…"); !ok || moved != box {
+					t.Fatalf("frame %d: the text moved: %+v to %+v", i, box, moved)
+				}
+				screenshot(t, tt, fmt.Sprintf("shimmer-reduced-%v-%02d", reduced, i))
+			}
+			if reduced && len(frames) != 1 {
+				t.Fatalf("reduced motion still animates: %d distinct frames", len(frames))
+			}
+			if !reduced && len(frames) < 4 {
+				t.Fatalf("the text does not shimmer: %d distinct frames", len(frames))
+			}
+			a.Stop(id)
+			waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running })
+			if tt.HasText("Working…") {
+				t.Fatal("working text outlived the turn")
+			}
+		})
 	}
 }
