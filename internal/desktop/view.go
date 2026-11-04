@@ -22,7 +22,8 @@ type View struct {
 	forkResult                           chan forkResult
 	creating, archived, deleting         bool
 	settingsOpen, usageOpen              bool
-	focused                              string // the thread the app was last told is in view
+	focused                              string            // the thread the app was last told is in view
+	queued                               map[string]string // messages to send once their threads connect
 	drag                                 sidebarDrag
 	springing                            bool
 	sidebarShown                         float32 // as of the last frame
@@ -55,7 +56,7 @@ func New(a *app.App, command string) *View {
 	if command == "" {
 		command = s.LastCommand
 	}
-	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, drafts: map[string]*string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
+	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, drafts: map[string]*string{}, queued: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
 	for _, t := range s.Threads {
 		if !t.Archived {
 			v.selected = t.ID
@@ -134,6 +135,42 @@ func (v *View) send(id, text string) bool {
 		list.ScrollToEnd()
 	}
 	return true
+}
+
+// queue sends a message as soon as the thread's session is connected. The draft
+// shows it, read-only, until then, so what goes out is what the user saw.
+func (v *View) queue(id, text string) {
+	if strings.TrimSpace(text) != "" {
+		v.queued[id] = text
+	}
+}
+
+// unqueue takes a draft back for editing.
+func (v *View) unqueue(id string) {
+	delete(v.queued, id)
+	v.picker.refocus = id == v.selected
+}
+
+// sendQueued sends the drafts whose threads have connected. If connecting failed
+// there is nothing to send on, so the draft returns to the user.
+func (v *View) sendQueued() {
+	if len(v.queued) == 0 {
+		return
+	}
+	s := v.app.Snapshot()
+	for id, text := range v.queued {
+		i := slices.IndexFunc(s.Threads, func(t app.ThreadView) bool { return t.ID == id })
+		switch {
+		case i < 0 || s.Threads[i].Archived:
+			delete(v.queued, id)
+		case s.Threads[i].Configuring || s.Threads[i].Running:
+		case s.Threads[i].Connected && s.Threads[i].SessionError == "":
+			delete(v.queued, id)
+			v.send(id, text)
+		default:
+			delete(v.queued, id)
+		}
+	}
 }
 
 func (v *View) archive(t app.ThreadView) {
@@ -231,6 +268,7 @@ func (v *View) Draw(c *ui.Context) {
 		default:
 		}
 	}
+	v.sendQueued()
 	if v.focused != v.selected {
 		v.focused = v.selected
 		v.app.FocusThread(v.selected)
@@ -805,6 +843,9 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					ui.Row(c).AlignSelf(ui.End).Shrink(0).Gap(2).Children(func() {
 						if thread.Running || thread.Configuring {
 							status := connectingText(thread, "Updating session…")
+							if _, waiting := v.queued[thread.ID]; waiting {
+								status = "Sends when ready…"
+							}
 							if thread.Running {
 								status = thread.Status
 							}
@@ -817,11 +858,21 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 							}
 							label.SingleLine().MaxWidth(statusWidth).Margin(0, 6, 0, 0)
 						}
-						if thread.Running {
+						_, waiting := v.queued[thread.ID]
+						switch {
+						case thread.Running:
 							roundButton(c, "Stop", stopIcon, false, false).OnClick(func() { v.app.Stop(thread.ID) })
-						} else {
-							disabled := thread.Configuring || strings.TrimSpace(*v.draft(thread.ID)) == ""
-							roundButton(c, "Send", sendIcon, true, disabled).OnClick(func() { v.send(thread.ID, *v.draft(thread.ID)) })
+						case waiting:
+							roundButton(c, "Cancel sending", stopIcon, false, false).OnClick(func() { v.unqueue(thread.ID) })
+						default:
+							disabled := strings.TrimSpace(*v.draft(thread.ID)) == "" || (thread.Configuring && thread.Connected)
+							roundButton(c, "Send", sendIcon, true, disabled).OnClick(func() {
+								if thread.Configuring {
+									v.queue(thread.ID, *v.draft(thread.ID))
+								} else {
+									v.send(thread.ID, *v.draft(thread.ID))
+								}
+							})
 						}
 					})
 				})

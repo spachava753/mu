@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -116,6 +117,15 @@ func main() {
 		s := open[p.SessionID]
 		switch m.Method {
 		case "initialize":
+			if slices.Contains(os.Args, "gate") {
+				// Hold startup until the test creates this file.
+				for {
+					if _, err := os.Stat(filepath.Join(storeDir(), "release")); err == nil {
+						break
+					}
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
 			if slices.Contains(os.Args, "slow-init") {
 				time.Sleep(500 * time.Millisecond)
 			}

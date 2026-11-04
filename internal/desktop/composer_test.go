@@ -3,6 +3,7 @@ package desktop_test
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -305,6 +306,151 @@ func TestConnectingNewThreadSaysStarting(t *testing.T) {
 		t.Fatalf("said it %d times: %q", got, tt.Texts())
 	}
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+}
+
+// Pressing Enter while the agent starts sends the message once it is connected.
+// The agent stays starting until each test lets it go.
+func TestEnterWhileConnectingSendsWhenReady(t *testing.T) {
+	fixture := func(t *testing.T, args string) (a *app.App, tt *ui.Tester, release func()) {
+		t.Helper()
+		a = testApp(t)
+		command := testutil.Agent(t)
+		store := filepath.Join(filepath.Dir(command), "fixture-sessions")
+		release = func() {
+			if err := os.MkdirAll(store, 0o700); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(filepath.Join(store, "release"), nil, 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		t.Cleanup(release) // Before the app closes.
+		if _, err := a.Create(fmt.Sprintf("%q gate %s", command, args), ""); err != nil {
+			t.Fatal(err)
+		}
+		tt = ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+		tt.Frame()
+		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Configuring })
+		return a, tt, release
+	}
+	typeAndEnter := func(t *testing.T, tt *ui.Tester) {
+		t.Helper()
+		click(t, tt, "Message")
+		tt.Type("fix the bug")
+		tt.Frame()
+		tt.Key(0, ui.KeyEnter)
+		tt.Frame()
+	}
+	sent := func(text string) func(app.Snapshot) bool {
+		return func(s app.Snapshot) bool {
+			th := s.Threads[0]
+			return len(th.Entries) > 0 && th.Entries[0].Text == text && !th.Running
+		}
+	}
+	t.Run("sends", func(t *testing.T) {
+		a, tt, release := fixture(t, "session-ui")
+		typeAndEnter(t, tt)
+		if !tt.HasText("Sends when ready…") {
+			t.Fatal("no sign the message is waiting", tt.Texts())
+		}
+		// The keyboard stays in the draft, which cannot change, and a second Enter
+		// does not undo the first.
+		tt.Type("more")
+		tt.Key(0, ui.KeyEnter)
+		tt.Frame()
+		if !tt.HasText("Sends when ready…") || !tt.Focused("Message") {
+			t.Fatal("a second Enter undid the first", tt.Texts())
+		}
+		if _, ok := tt.Find("Cancel sending"); !ok {
+			t.Fatal("no way to take it back", tt.Texts())
+		}
+		if th := a.Snapshot().Threads[0]; th.Connected || len(th.Entries) != 0 {
+			t.Fatalf("sent too soon: %+v", th.Entries)
+		}
+		screenshot(t, tt, "send-when-ready")
+		release()
+		waitView(t, a, tt, sent("fix the bug"))
+		if th := a.Snapshot().Threads[0]; th.Title != "fix the bug" {
+			t.Fatalf("title %q", th.Title)
+		}
+		tt.Frame()
+		if tt.HasText("Sends when ready…") {
+			t.Fatal("still waiting", tt.Texts())
+		}
+		if !tt.Focused("Message") {
+			t.Fatal("the keyboard did not return to the draft")
+		}
+	})
+	t.Run("escape", func(t *testing.T) {
+		a, tt, release := fixture(t, "session-ui")
+		typeAndEnter(t, tt)
+		tt.Key(0, ui.KeyEscape)
+		tt.Frame()
+		if tt.HasText("Sends when ready…") {
+			t.Fatal("Escape did not take the message back", tt.Texts())
+		}
+		tt.Type(", please")
+		tt.Key(0, ui.KeyEnter)
+		tt.Frame()
+		release()
+		waitView(t, a, tt, sent("fix the bug, please"))
+	})
+	t.Run("cancel", func(t *testing.T) {
+		a, tt, release := fixture(t, "session-ui")
+		typeAndEnter(t, tt)
+		click(t, tt, "Cancel sending")
+		release()
+		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+		tt.Frame()
+		if th := a.Snapshot().Threads[0]; len(th.Entries) != 0 || th.Title != "New thread" {
+			t.Fatalf("sent after cancelling: %q %+v", th.Title, th.Entries)
+		}
+		// The draft is still there to send.
+		tt.Key(0, ui.KeyEnter)
+		waitView(t, a, tt, sent("fix the bug"))
+	})
+	t.Run("connecting fails", func(t *testing.T) {
+		a, tt, release := fixture(t, "no-fork")
+		typeAndEnter(t, tt)
+		release()
+		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].SessionError != "" && !s.Threads[0].Configuring })
+		tt.Frame()
+		if th := a.Snapshot().Threads[0]; len(th.Entries) != 0 || th.Running {
+			t.Fatalf("sent without a session: %+v", th.Entries)
+		}
+		if tt.HasText("Sends when ready…") {
+			t.Fatal("still waiting", tt.Texts())
+		}
+		screenshot(t, tt, "send-when-ready-failed")
+	})
+	t.Run("only while connecting", func(t *testing.T) {
+		a, tt, release := fixture(t, "session-ui wait-config")
+		release()
+		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+		click(t, tt, "Optional behavior")
+		click(t, tt, "On")
+		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Configuring })
+		click(t, tt, "Message")
+		tt.Type("hello")
+		tt.Frame()
+		tt.Key(0, ui.KeyEnter)
+		tt.Frame()
+		if tt.HasText("Sends when ready…") {
+			t.Fatal("queued behind an option change, which the agent could refuse")
+		}
+		if th := a.Snapshot().Threads[0]; len(th.Entries) != 0 {
+			t.Fatalf("sent during an option change: %+v", th.Entries)
+		}
+	})
+	t.Run("empty draft", func(t *testing.T) {
+		_, tt, _ := fixture(t, "session-ui")
+		click(t, tt, "Message")
+		tt.Key(0, ui.KeyEnter)
+		tt.Frame()
+		if tt.HasText("Sends when ready…") {
+			t.Fatal("queued nothing")
+		}
+	})
 }
 
 // A new thread whose agent cannot start says so and offers to try again, since no

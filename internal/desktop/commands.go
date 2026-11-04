@@ -45,7 +45,19 @@ func (p *commandPicker) matches(text string, commands []acp.AvailableCommand) []
 // anchors the slash-command suggestions.
 func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) ui.Element {
 	p := &v.picker
-	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).Disabled(t.Running).OnTextKey(func(k ui.TextKey) bool {
+	queued, waiting := v.queued[t.ID]
+	if waiting {
+		*v.draft(t.ID) = queued // What shows is what will go out.
+	}
+	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).Disabled(t.Running).ReadOnly(waiting).OnTextKey(func(k ui.TextKey) bool {
+		if _, waiting := v.queued[t.ID]; waiting {
+			// Waiting to send: another Enter changes nothing, and Escape takes it back.
+			if k.Key == ui.KeyEscape && k.Mods == 0 {
+				v.unqueue(t.ID)
+				return true
+			}
+			return k.Key == ui.KeyEnter
+		}
 		matches := p.matches(k.Text(), t.Session.Commands)
 		_, slash := slashQuery(k.Text())
 		if slash && !p.dismissed && k.Mods == 0 {
@@ -72,8 +84,13 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 			}
 		}
 		if k.Key == ui.KeyEnter && k.Mods == 0 && !t.Running {
-			if !t.Configuring && v.send(t.ID, k.Text()) {
-				k.SetText("")
+			switch {
+			case !t.Configuring:
+				if v.send(t.ID, k.Text()) {
+					k.SetText("")
+				}
+			case !t.Connected:
+				v.queue(t.ID, k.Text())
 			}
 			return true
 		}
@@ -85,7 +102,7 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 	}
 	matches := p.matches(*v.draft(t.ID), t.Session.Commands)
 	_, slash := slashQuery(*v.draft(t.ID))
-	p.open = slash && !p.dismissed && !t.Running && (input.Focused() || p.open)
+	p.open = slash && !p.dismissed && !t.Running && !waiting && (input.Focused() || p.open)
 	if p.open {
 		v.usageOpen = false
 		if !t.Connected && !t.Configuring && !p.attemptedConnection {
