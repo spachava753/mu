@@ -40,14 +40,8 @@ func (a *App) Discover(agentID string) error {
 	if a.closed {
 		return errors.New("app is closing")
 	}
-	var config state.AgentConfig
-	for _, c := range a.data.Agents {
-		if c.ID == agentID {
-			config = c
-			break
-		}
-	}
-	if config.ID == "" {
+	config, ok := a.agentConfigLocked(agentID)
+	if !ok {
 		return errors.New("choose a saved agent in Settings")
 	}
 	if a.catalogCancel != nil {
@@ -199,9 +193,7 @@ func (a *App) Import(generation uint64, sessionIDs []string) ([]string, error) {
 	if generation != c.Generation || !c.Complete || c.Loading || c.Error != "" {
 		return nil, errors.New("refresh discovery before importing sessions")
 	}
-	if !slices.ContainsFunc(a.data.Agents, func(config state.AgentConfig) bool {
-		return config.ID == c.Agent.ID && config.Command == c.Agent.Command
-	}) {
+	if config, ok := a.agentConfigLocked(c.Agent.ID); !ok || config.Command != c.Agent.Command {
 		return nil, errors.New("agent configuration changed; refresh discovery before importing")
 	}
 	old := a.data.Threads

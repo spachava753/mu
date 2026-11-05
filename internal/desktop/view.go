@@ -34,6 +34,7 @@ type View struct {
 	renameID, renameTitle, renameError   string
 	command, agentID, workDir, projectID string
 	projects                             projectEditor
+	builtins                             builtinEditor
 	customCommand                        bool
 	editAgent                            state.AgentConfig
 	makeDefault                          bool
@@ -52,11 +53,12 @@ type View struct {
 
 func New(a *app.App, command string) *View {
 	s := a.Snapshot()
-	custom := command != "" || len(s.Agents) == 0
+	custom := command != "" || len(s.Agents)+len(s.Builtins) == 0
 	if command == "" {
 		command = s.LastCommand
 	}
-	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, drafts: map[string]*string{}, queued: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
+	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, builtins: newBuiltinEditor(), drafts: map[string]*string{}, queued: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
+	v.builtins.load(s.Builtins) // Check again works from more than Settings, and saves this.
 	for _, t := range s.Threads {
 		if !t.Archived {
 			v.selected = t.ID
@@ -91,6 +93,7 @@ func (v *View) openNew() {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
 	v.creating, v.settingsOpen, v.err = true, false, ""
+	v.app.RefreshBuiltins()
 	s := v.app.Snapshot()
 	v.agentID, v.projectID = s.DefaultAgentID, ""
 	// Start in the project of the thread being viewed.
@@ -282,6 +285,7 @@ func (v *View) Draw(c *ui.Context) {
 	// can animate. An empty layer draws nothing and takes no input.
 	ui.Overlay(c, func() {})
 	s := v.app.Snapshot()
+	v.keepAgentAvailable(s)
 	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
 		v.sidebar(c, s)
 		// The content is an inset panel on the chrome, as in Linear.
@@ -320,7 +324,7 @@ func (v *View) Draw(c *ui.Context) {
 				}
 				for _, t := range s.Threads {
 					if t.ID == v.selected {
-						v.thread(c, t)
+						v.thread(c, s, t)
 						return
 					}
 				}
@@ -606,7 +610,9 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 	})
 	ui.Scroll(c).Grow(1).MinHeight(0).Padding(20, 24).Children(func() {
 		ui.Column(c).MaxWidth(560).Gap(18).Children(func() {
-			if len(s.Agents) > 0 && !v.customCommand {
+			choices := v.agentChoices(s)
+			builtin, isBuiltin := builtinByID(s, v.agentID)
+			if len(choices) > 0 && !v.customCommand {
 				var command string
 				for _, a := range s.Agents {
 					if a.ID == v.agentID {
@@ -614,12 +620,11 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 					}
 				}
 				field(c, "Agent", "", func() {
-					choices := []choice{}
-					for _, a := range s.Agents {
-						choices = append(choices, choice{ID: a.ID, Name: a.Name, Description: a.Command})
-					}
 					selectChoice(c.Key("agent"), "Configured agent", v.agentID, choices, false, func(id string) { v.agentID = id })
-					if command != "" {
+					switch {
+					case isBuiltin:
+						v.builtinStatusLine(c, builtin)
+					case command != "":
 						ui.Text(c, command).SingleLine().Font("monospace").FontSize(11.5).TextColor(t.TextMuted).Tooltip(command)
 					}
 					ui.Row(c).Gap(4).Margin(-2, 0, 0, -7).Children(func() {
@@ -632,11 +637,14 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 					ui.TextInput(c.Key("agent-command"), &v.command).Label("Agent command").Placeholder("Executable and arguments").AutoFocus()
 					ui.Row(c).Gap(4).Margin(-2, 0, 0, -7).Children(func() {
 						quietButton(c, "Save agents in Settings").OnClick(v.openSettings)
-						if len(s.Agents) > 0 {
+						if len(choices) > 0 {
 							quietButton(c, "Use saved agent").OnClick(func() { v.customCommand = false })
 						}
 					})
 				})
+				if len(choices) == 0 {
+					v.builtinsNotFound(c, s)
+				}
 			}
 			field(c, "Project", "Agents run as your user, with your environment and filesystem access. Use commands you trust.", func() {
 				folder := "Works in a new, randomly named folder in " + shortPath(s.WorkingDirectory) + "."
@@ -654,8 +662,8 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 				})
 			})
 			ui.Row(c).Gap(8).Children(func() {
-				custom := v.customCommand || len(s.Agents) == 0
-				missing := (custom && strings.TrimSpace(v.command) == "") || (!custom && v.agentID == "")
+				custom := v.customCommand || len(choices) == 0
+				missing := (custom && strings.TrimSpace(v.command) == "") || (!custom && v.agentID == "") || (!custom && isBuiltin && !builtin.Usable())
 				ui.PrimaryButton(c, "Create thread").Disabled(missing).OnClick(func() {
 					var id string
 					var err error
@@ -723,8 +731,9 @@ func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 	})
 }
 
-func (v *View) thread(c *ui.Context, thread app.ThreadView) {
+func (v *View) thread(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 	t := c.Theme()
+	builtin, isBuiltin := builtinByID(s, thread.AgentID)
 	ui.Column(c.Key(thread.ID)).Grow(1).MinHeight(0).Children(func() {
 		v.threadHeader(c, thread)
 		if thread.TitleError != "" {
@@ -732,8 +741,14 @@ func (v *View) thread(c *ui.Context, thread app.ThreadView) {
 				iconButton(c, "Dismiss title error", closeIcon).OnClick(func() { v.app.DismissTitleError(thread.ID) })
 			})
 		}
+		if isBuiltin && builtin.Status.State == app.BuiltinSignedOut && thread.Connected {
+			v.errorBox(c, builtin.SignInHelp)
+		}
 		if thread.SessionError != "" {
 			v.errorBox(c, thread.SessionError, func() {
+				if isBuiltin && builtin.Status.State == app.BuiltinNotFound {
+					v.builtinLink(c, builtin)
+				}
 				if !thread.Archived && !thread.Running && !thread.Configuring && !thread.Connected {
 					ui.Button(c, "Retry connection").OnClick(func() { v.fail(v.app.Reload(thread.ID)) })
 				}
@@ -1056,14 +1071,21 @@ func (v *View) activity(c *ui.Context, threadID string, e state.Entry) {
 			}
 			chip(c, status, color)
 		}
+		if len(e.Diffs) > 0 {
+			diffStat(c, e.Diffs)
+		}
 	})
 	p.Panel(func() {
+		v.diffs(c, e.ToolID, e.Diffs)
+		if e.Input != "" {
+			toolBlock(c, e.Input, toolInputHeight)
+		}
 		switch {
 		case e.Role == "plan":
 			markdown.View(c, e.Text, &v.md)
 		case e.Text == "":
 		case e.Role == "tool":
-			ui.Text(c, e.Text).Selectable().Font("monospace").FontSize(12).Padding(8, 10).Radius(6).Border(1, t.Border).Background(t.Surface)
+			toolBlock(c, e.Text, toolOutputHeight)
 		default:
 			ui.Text(c, e.Text).Selectable().FontSize(13).LineHeight(1.5).TextColor(t.TextMuted)
 		}
@@ -1090,6 +1112,7 @@ func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 					ui.Text(c, kind).FontSize(11.5).TextColor(t.TextMuted).Shrink(0)
 				}
 			})
+			v.diffs(c, p.ID, p.Tool.Diffs)
 			if p.Tool.Text != "" {
 				ui.Scroll(c).MaxHeight(120).Radius(6).Border(1, t.Border).Background(t.Background).Padding(8, 10).Children(func() {
 					ui.Text(c, strings.TrimRight(p.Tool.Text, "\n")).Selectable().Font("monospace").FontSize(11.5).TextColor(t.TextMuted)

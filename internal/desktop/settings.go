@@ -12,8 +12,13 @@ func (v *View) openSettings() {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
 	v.settingsOpen, v.err, v.settingsNotice = true, "", ""
+	v.app.RefreshBuiltins()
 	s := v.app.Snapshot()
+	v.builtins.load(s.Builtins)
 	v.editAgent = state.AgentConfig{}
+	if _, ok := builtinByID(s, s.DefaultAgentID); ok {
+		v.editAgent.ID = s.DefaultAgentID // A built-in opens under its own row.
+	}
 	for _, a := range s.Agents {
 		if a.ID == s.DefaultAgentID {
 			v.editAgent = a
@@ -51,15 +56,19 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 					ui.Text(c, "Agents").FontSize(13).FontWeight(500)
 					ui.Text(c, "The default agent is selected for new threads.").FontSize(11.5).TextColor(t.TextMuted)
 				})
-				ui.Button(c, "Add agent").OnClick(func() {
+				ui.Button(c, "Add custom agent").OnClick(func() {
 					v.editAgent = state.AgentConfig{}
 					v.makeDefault = len(s.Agents) == 0
 					v.settingsNotice, v.err = "", ""
 				})
 			})
+			if len(s.Builtins) > 0 {
+				v.builtinAgents(c, s)
+				agentsCaption(c, "Custom", "Any ACP agent, started with a command you enter.")
+			}
 			ui.Column(c).Radius(8).Border(1, t.Border).Clip().Children(func() {
 				if len(s.Agents) == 0 {
-					ui.Text(c, "No saved agents yet. Add one below.").Padding(12, 14).FontSize(12.5).TextColor(t.TextMuted)
+					ui.Text(c, "No custom agents.").Padding(10, 14).FontSize(12.5).TextColor(t.TextMuted)
 				}
 				for i, agent := range s.Agents {
 					row := ui.ButtonBase(c.Key(agent.ID)).Transition(colorMotion).Label("Edit agent: "+agent.Name).FillWidth().Padding(9, 14).Gap(10)
@@ -83,51 +92,59 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 					})
 				}
 			})
-			ui.Column(c).Margin(6, 0, 0, 0).Padding(16).Gap(16).Radius(8).Border(1, t.Border).Background(t.Surface).Children(func() {
-				heading := "Add an agent"
-				if v.editAgent.ID != "" {
-					heading = "Edit agent"
-				}
-				ui.Text(c, heading).FontSize(13).FontWeight(500)
-				field(c, "Name", "", func() {
-					ui.TextInput(c.Key("agent-name"), &v.editAgent.Name).Label("Agent name").Placeholder("A name for this configuration")
-				})
-				field(c, "Command", "Runs exactly as entered, with normal PATH lookup. Quote paths containing spaces. No shell expansion or adapter discovery.", func() {
-					ui.TextInput(c.Key("saved-command"), &v.editAgent.Command).Label("Saved agent command").Placeholder("Executable and arguments")
-				})
-				ui.Checkbox(c, &v.makeDefault, "Default for new threads").Disabled(v.editAgent.ID != "" && v.editAgent.ID == s.DefaultAgentID)
-				ui.Row(c).Gap(8).Wrap().Children(func() {
-					ui.PrimaryButton(c, "Save agent").Disabled(strings.TrimSpace(v.editAgent.Name) == "" || strings.TrimSpace(v.editAgent.Command) == "").OnClick(func() {
-						id, err := v.app.SaveAgent(v.editAgent, v.makeDefault)
-						if err != nil {
-							v.fail(err)
-							return
-						}
-						v.editAgent.ID, v.settingsNotice, v.err = id, "Agent saved. Existing threads keep their original command.", ""
-						v.agentID, v.customCommand = v.app.Snapshot().DefaultAgentID, false
-						v.makeDefault = id == v.agentID
-					})
-					if v.editAgent.ID != "" && v.editAgent.ID != s.DefaultAgentID {
-						ui.Button(c, "Make default").OnClick(func() {
-							v.fail(v.app.SetDefaultAgent(v.editAgent.ID))
-							v.agentID = v.app.Snapshot().DefaultAgentID
-							v.makeDefault = true
-						})
-					}
-					ui.Spacer(c)
-					if v.editAgent.ID != "" {
-						ui.Button(c, "Remove agent").TextColor(t.Danger).OnClick(func() { v.removeAgent = true })
-					}
-				})
-				if v.settingsNotice != "" {
-					ui.Row(c).Gap(6).Children(func() {
-						ui.Icon(c, checkIcon).Size(14, 14).TextColor(okColor(t))
-						ui.Text(c, v.settingsNotice).FontSize(12).TextColor(t.TextMuted)
-					})
-				}
-			})
+			if !v.builtinOpen(s) {
+				v.agentForm(c, s)
+			}
 			ui.Text(c, "Only configure agents you trust. Commands are stored locally in plain text; keep credentials out of them.").FontSize(11.5).TextColor(t.TextMuted)
 		})
+	})
+}
+
+// agentForm adds or edits a custom agent.
+func (v *View) agentForm(c *ui.Context, s app.Snapshot) {
+	t := c.Theme()
+	ui.Column(c).Margin(6, 0, 0, 0).Padding(16).Gap(16).Radius(8).Border(1, t.Border).Background(t.Surface).Children(func() {
+		heading := "Add a custom agent"
+		if v.editAgent.ID != "" {
+			heading = "Edit custom agent"
+		}
+		ui.Text(c, heading).FontSize(13).FontWeight(500)
+		field(c, "Name", "", func() {
+			ui.TextInput(c.Key("agent-name"), &v.editAgent.Name).Label("Agent name").Placeholder("A name for this configuration")
+		})
+		field(c, "Command", "Runs exactly as entered, with normal PATH lookup. Quote paths containing spaces. No shell expansion or adapter discovery.", func() {
+			ui.TextInput(c.Key("saved-command"), &v.editAgent.Command).Label("Saved agent command").Placeholder("Executable and arguments")
+		})
+		ui.Checkbox(c, &v.makeDefault, "Default for new threads").Disabled(v.editAgent.ID != "" && v.editAgent.ID == s.DefaultAgentID)
+		ui.Row(c).Gap(8).Wrap().Children(func() {
+			ui.PrimaryButton(c, "Save agent").Disabled(strings.TrimSpace(v.editAgent.Name) == "" || strings.TrimSpace(v.editAgent.Command) == "").OnClick(func() {
+				id, err := v.app.SaveAgent(v.editAgent, v.makeDefault)
+				if err != nil {
+					v.fail(err)
+					return
+				}
+				v.editAgent.ID, v.settingsNotice, v.err = id, "Agent saved. Existing threads keep their original command.", ""
+				v.agentID, v.customCommand = v.app.Snapshot().DefaultAgentID, false
+				v.makeDefault = id == v.agentID
+			})
+			if v.editAgent.ID != "" && v.editAgent.ID != s.DefaultAgentID {
+				ui.Button(c, "Make default").OnClick(func() {
+					v.fail(v.app.SetDefaultAgent(v.editAgent.ID))
+					v.agentID = v.app.Snapshot().DefaultAgentID
+					v.makeDefault = true
+				})
+			}
+			ui.Spacer(c)
+			if v.editAgent.ID != "" {
+				ui.Button(c, "Remove agent").TextColor(t.Danger).OnClick(func() { v.removeAgent = true })
+			}
+		})
+		if v.settingsNotice != "" {
+			ui.Row(c).Gap(6).Children(func() {
+				ui.Icon(c, checkIcon).Size(14, 14).TextColor(okColor(t))
+				ui.Text(c, v.settingsNotice).FontSize(12).TextColor(t.TextMuted)
+			})
+		}
 	})
 }
 

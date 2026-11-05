@@ -256,8 +256,10 @@ func TestQAPermissionCards(t *testing.T) {
 					t.Fatalf("permission card lacks %q: %v", text, tt.Texts())
 				}
 			}
-			if !slices.ContainsFunc(tt.Texts(), func(s string) bool { return strings.HasPrefix(s, "/workspace/notes.txt:3\n") }) {
-				t.Fatal("permission card lacks the tool call's location and diff", tt.Texts())
+			for _, text := range []string{"/workspace/notes.txt:3", "old", "new", "+1", "−1"} {
+				if !slices.Contains(tt.Texts(), text) {
+					t.Fatalf("permission card lacks the tool call's location and diff: %q in %q", text, tt.Texts())
+				}
 			}
 			screenshot(t, tt, fmt.Sprintf("permission-tool-%d", size[0]))
 			// Expanded details stay bounded: the composer remains in view, and

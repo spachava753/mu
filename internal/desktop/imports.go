@@ -16,6 +16,7 @@ type forkResult struct {
 
 func (v *View) openImports() {
 	v.importOpen, v.settingsOpen, v.usageOpen = true, false, false
+	v.app.RefreshBuiltins()
 	v.agentID = v.app.Snapshot().DefaultAgentID
 	v.importSelected = map[string]bool{}
 	v.importQuery, v.importNotice, v.err = "", "", ""
@@ -27,15 +28,12 @@ func (v *View) imports(c *ui.Context, s app.Snapshot) {
 		ui.Button(c, "Manage agents").OnClick(v.openSettings)
 	})
 	ui.Column(c).Grow(1).MinHeight(0).Padding(16, 24).Gap(12).Children(func() {
-		if len(s.Agents) == 0 {
+		choices := v.agentChoices(s)
+		if len(choices) == 0 {
 			ui.Text(c, "Save an agent configuration before discovering its sessions.").FontSize(13).TextColor(t.TextMuted)
 			return
 		}
 		ui.Row(c).Gap(8).Children(func() {
-			choices := []choice{}
-			for _, a := range s.Agents {
-				choices = append(choices, choice{ID: a.ID, Name: a.Name, Description: a.Command})
-			}
 			ui.Column(c).Width(190).Shrink(0).Children(func() {
 				selectChoice(c.Key("discovery-agent"), "Discovery agent", v.agentID, choices, s.Catalog.Loading, func(id string) { v.agentID = id; v.importSelected = map[string]bool{}; v.importNotice = "" })
 			})

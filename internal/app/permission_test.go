@@ -52,7 +52,7 @@ func TestPermissionDescribesKnownToolCall(t *testing.T) {
 	// The request names only the tool call ID; the card uses its projection.
 	v := await(t, a, id, func(v ThreadView) bool { return len(v.Permissions) == 1 && v.Permissions[0].Tool.Title != "" })
 	tool := v.Permissions[0].Tool
-	if tool.Title != "Edit notes" || tool.Kind != "edit" || !strings.HasPrefix(tool.Text, "/workspace/notes.txt:3\n") || !strings.Contains(tool.Text, "After:\nnew") || !strings.Contains(tool.Details, `"title": "Edit notes"`) {
+	if tool.Title != "Edit notes" || tool.Kind != "edit" || !strings.HasPrefix(tool.Text, "/workspace/notes.txt:3\n") || (len(tool.Diffs) != 1 || tool.Diffs[0].Path != "/workspace/notes.txt" || tool.Diffs[0].Added != 1 || tool.Diffs[0].Removed != 1) || !strings.Contains(tool.Details, `"title": "Edit notes"`) {
 		t.Fatalf("permission does not describe the known tool call: %+v", tool)
 	}
 	a.Answer(id, v.Permissions[0].ID, "always")

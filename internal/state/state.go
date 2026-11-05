@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/spachava753/acp-sdk/acp"
+	"github.com/spachava753/mu/internal/textdiff"
 )
 
 type Entry struct {
@@ -25,6 +26,10 @@ type Entry struct {
 	Status    string `json:"status,omitempty"`
 	Details   string `json:"details,omitempty"`
 	PlanID    string `json:"planId,omitempty"`
+	// Input is what a tool call was asked to do, as text.
+	Input string `json:"-"`
+	// Diffs are computed once when a tool call changes, and shared by snapshots.
+	Diffs []textdiff.File `json:"-"`
 }
 
 type Thread struct {
@@ -84,15 +89,23 @@ type Project struct {
 	Dir  string `json:"dir"`
 }
 
+// BuiltinSettings is what the user has set for an agent built into Mu.
+type BuiltinSettings struct {
+	Executable string `json:"executable,omitempty"`
+}
+
 type Data struct {
-	Agents           []AgentConfig `json:"agents,omitempty"`
-	Projects         []Project     `json:"projects,omitempty"`
-	DefaultAgentID   string        `json:"defaultAgentId,omitempty"`
-	SidebarCollapsed bool          `json:"sidebarCollapsed,omitempty"`
-	SidebarWidth     float32       `json:"sidebarWidth,omitempty"`
-	LastCommand      string        `json:"lastCommand,omitempty"`
-	WorkingDirectory string        `json:"workingDirectory,omitempty"`
-	Threads          []Thread      `json:"threads"`
+	Agents []AgentConfig `json:"agents,omitempty"`
+	// Builtins is keyed by the built-in's name. Treat the map as immutable, and
+	// replace it to change it.
+	Builtins         map[string]BuiltinSettings `json:"builtins,omitempty"`
+	Projects         []Project                  `json:"projects,omitempty"`
+	DefaultAgentID   string                     `json:"defaultAgentId,omitempty"`
+	SidebarCollapsed bool                       `json:"sidebarCollapsed,omitempty"`
+	SidebarWidth     float32                    `json:"sidebarWidth,omitempty"`
+	LastCommand      string                     `json:"lastCommand,omitempty"`
+	WorkingDirectory string                     `json:"workingDirectory,omitempty"`
+	Threads          []Thread                   `json:"threads"`
 }
 
 func ID() string {

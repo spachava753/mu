@@ -8,6 +8,7 @@ import (
 
 	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/state"
+	"github.com/spachava753/mu/internal/textdiff"
 )
 
 func contentText(b acp.ContentBlock) string {
@@ -37,28 +38,75 @@ func deref[T any](v *T) T {
 	return *v
 }
 
+// displayTabWidth is how far a tab reaches in what Mu shows of tool calls. The text
+// renderer drops tabs, which would flatten the indentation of code.
+const displayTabWidth = 4
+
+func expandTabs(text string) string {
+	return strings.ReplaceAll(text, "\t", strings.Repeat(" ", displayTabWidth))
+}
+
+// toolInput says what a tool was asked to do, for any tool: when there's one piece of
+// text among its arguments, such as a command or a script, that text with its real
+// line breaks, and otherwise all of them. A tool that shows a diff needs neither.
+func toolInput(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	if arguments, ok := raw.(map[string]any); ok {
+		var only string
+		count := 0
+		for _, value := range arguments {
+			if text, ok := value.(string); ok {
+				only = text
+				count++
+			}
+		}
+		if count == 1 {
+			return expandTabs(only)
+		}
+	}
+	return expandTabs(pretty(raw))
+}
+
+// toolText is a tool call's content as text. Diffs are left to toolDiffs, and a tool
+// that has any isn't described by its raw output.
 func toolText(content []acp.ToolCallContent, raw any) string {
 	var b strings.Builder
+	hasDiff := false
 	for _, c := range content {
 		switch c.Type {
 		case acp.ToolCallContentTypeContent:
 			b.WriteString(contentText(c.Content))
 			b.WriteByte('\n')
 		case acp.ToolCallContentTypeDiff:
-			b.WriteString("File: " + c.Path + "\n")
-			if c.OldText != nil {
-				b.WriteString("Before:\n" + *c.OldText + "\n")
-			}
-			b.WriteString("After:\n" + c.NewText + "\n")
+			hasDiff = true
 		case acp.ToolCallContentTypeTerminal:
 			// Mu runs no terminals, so it has no output for this reference.
 			b.WriteString("Terminal: " + string(c.TerminalID) + "\n")
 		}
 	}
-	if b.Len() == 0 && raw != nil {
+	if b.Len() == 0 && raw != nil && !hasDiff {
 		b.WriteString(pretty(raw))
 	}
-	return b.String()
+	return expandTabs(b.String())
+}
+
+// toolDiffs computes the diffs in a tool call's content. This is bounded work, done
+// once when the content changes, so nothing that draws ever has to compute one.
+func toolDiffs(content []acp.ToolCallContent) []textdiff.File {
+	var changes []textdiff.Change
+	for _, c := range content {
+		if c.Type == acp.ToolCallContentTypeDiff {
+			change := textdiff.Change{Path: c.Path, New: expandTabs(c.NewText)}
+			if c.OldText != nil {
+				old := expandTabs(*c.OldText)
+				change.Old = &old
+			}
+			changes = append(changes, change)
+		}
+	}
+	return textdiff.Files(changes)
 }
 
 func pretty(value any) string { b, _ := json.MarshalIndent(value, "", "  "); return string(b) }
@@ -137,7 +185,11 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 			call = &toolCall{}
 			r.tools[id] = call
 		}
-		call.patch(updatePatch(u))
+		patch := updatePatch(u)
+		call.patch(patch)
+		if patch.Content != nil {
+			call.diffs = toolDiffs(call.Content)
+		}
 		if r.job != nil && !r.initializing { // Not replayed history.
 			r.turnTools[id] = true
 		}
@@ -316,6 +368,7 @@ type toolCall struct {
 	// cancelled marks an unfinished call of a turn the user stopped. It only
 	// changes the displayed status; later agent updates still apply.
 	cancelled bool
+	diffs     []textdiff.File // of Content, as last computed
 }
 
 func (c *toolCall) finished() bool {
@@ -418,13 +471,20 @@ func renderTool(t *thread, id string, c *toolCall) {
 	if e.Title == "" {
 		e.Title = "Tool"
 	}
-	e.Text, e.Details = toolText(c.Content, c.RawOutput), pretty(c)
+	e.Text, e.Details, e.Diffs = toolText(c.Content, c.RawOutput), pretty(c), c.diffs
+	e.Input = ""
+	if len(c.diffs) == 0 {
+		e.Input = toolInput(c.RawInput)
+	}
 }
 
 // permissionTool describes a permission request's tool call: the known
 // projection, if any, patched with the request's fields. Patching replaces
 // fields and never modifies the projection's nested values.
-func permissionTool(known *toolCall, u acp.ToolCallUpdate) PermissionTool {
+//
+// This runs for every snapshot, so requestDiffs were computed when the request
+// arrived, and it only chooses which diffs apply.
+func permissionTool(known *toolCall, u acp.ToolCallUpdate, requestDiffs []textdiff.File) PermissionTool {
 	var call toolCall
 	if known != nil {
 		call = *known
@@ -438,12 +498,16 @@ func permissionTool(known *toolCall, u acp.ToolCallUpdate) PermissionTool {
 		}
 		b.WriteByte('\n')
 	}
+	diffs := call.diffs
+	if u.Content != nil {
+		diffs = requestDiffs
+	}
 	if text := toolText(call.Content, nil); text != "" {
 		b.WriteString(text)
-	} else if call.RawInput != nil {
+	} else if call.RawInput != nil && len(diffs) == 0 {
 		b.WriteString(pretty(call.RawInput) + "\n")
 	}
-	return PermissionTool{Title: call.Title, Kind: string(call.Kind), Text: b.String(), Details: pretty(call)}
+	return PermissionTool{Title: call.Title, Kind: string(call.Kind), Text: b.String(), Details: pretty(call), Diffs: diffs}
 }
 
 func planText(entries []acp.PlanEntry) string {

@@ -4,10 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/spachava753/mu/internal/app"
+	"github.com/spachava753/mu/internal/builtins"
 	"github.com/spachava753/mu/internal/desktop"
 	"github.com/spachava753/mu/internal/state"
 )
@@ -33,7 +35,7 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
-	a, err := app.Open(*dataDir, workDir)
+	a, err := app.Open(*dataDir, workDir, builtins.Pi(filepath.Join(*dataDir, "pi")))
 	if err != nil {
 		return err
 	}

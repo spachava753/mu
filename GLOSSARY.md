@@ -24,6 +24,10 @@ _Avoid_: Workspace, repository
 One running agent process that serves the sessions of every thread using the same agent configuration, and its discovery. A saved agent's connection stays open while idle.
 _Avoid_: Thread process
 
+**Built-in agent**:
+An agent whose ACP adapter ships with Mu and runs inside it, named by a command such as `mu:pi`. The agent itself is installed and signed in separately.
+_Avoid_: Bundled agent
+
 **Discovery**:
 Finding the sessions an agent makes available, without adding them to Mu's managed threads.
 _Avoid_: Automatic import, history synchronization

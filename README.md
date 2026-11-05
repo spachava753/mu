@@ -40,7 +40,7 @@ go build -o bin/mu .
 ./bin/mu
 ```
 
-Open **Settings** at the bottom of the sidebar to save an agent name and command, and choose a default. Then choose **New thread**, select a saved agent and optionally a project, and **Create thread**. A custom one-off command is also supported. Mu has no built-in agent default. Saved agents are created explicitly in Settings. Editing or removing a saved agent never changes existing threads' command snapshots.
+Choose **New thread**, select an agent and optionally a project, and **Create thread**. If [Pi](#pi) is installed it's ready to use with nothing to set up. For any other ACP agent, open **Settings** at the bottom of the sidebar to save a name and command, and choose a default; a custom one-off command is also supported. Editing or removing a saved agent never changes existing threads' command snapshots.
 
 ## Working directory and projects
 
@@ -75,6 +75,8 @@ Below the composer, Mu shows the branch of the thread's folder, the short commit
 
 If the `gh` command is available and signed in, the same line shows the number and state of the branch's pull request, such as **PR #12 · Open**, which you can click to open in your browser. Mu runs `gh pr view` for the thread in view: when you open it, after each turn, when its branch changes, and once a minute. With no `gh`, no sign-in, no GitHub remote or no pull request, it shows nothing.
 
+Tool calls that report ACP diffs show their size on the row, such as **+3 −1**, and the changes when expanded, for any agent. Permission cards show them too. Very large changes show their first lines and say how many more there are.
+
 The composer keeps a **context-usage indicator** visible, with the reported token count, window limit, percentage, and a bar that turns amber at 70% and red at 90%. Reported **session cost** appears alongside it in the agent's currency. Click the indicator for last-turn input/output, thinking and cache counts, and the stop reason; the same panel shows when the agent last updated the session and its metadata. Missing usage is explicitly shown as not reported, never zero. Provider-specific limits and other `_meta` data remain inspectable under **Agent metadata** there, without guessing their meaning.
 
 Type **/** at the start of the draft for a scrollable command picker above the composer. It filters the agent's advertised commands as you type. **Up/Down** selects, **Enter/Tab** inserts, and **Escape** dismisses. Clicking a command also inserts it and returns focus to the draft. Completion never sends a prompt; add arguments and send separately. If the thread could not connect when it opened, typing **/** tries again, without sending a prompt.
@@ -91,11 +93,18 @@ Agents ask before some tool calls with ACP `session/request_permission`. Mu show
 
 Requests can arrive outside a prompt turn and are shown the same way. Mu answers a request as cancelled only when you stop its session's turn (as ACP requires), or when the session is archived, removed, reloaded, or disconnected, or Mu quits. An agent cannot yet withdraw a pending request with `$/cancel_request`: the ACP SDK Mu uses does not support it, so such a card stays until you answer it.
 
-## Pi compatibility
+## Pi
 
-The previously tested `pi-acp@0.0.34` adapter is **not compatible with this session policy**. It advertises list/load (and delete), but not close/fork. Mu rejects it at initialization. Upgrade to an adapter that advertises and implements the required methods; Mu does not special-case Pi or supply missing capabilities. Pi's `_meta.terminal_output` data is kept as inspectable metadata, not shown as terminal output.
+Mu includes an ACP adapter for [Pi](https://pi.dev), so nothing else is needed but Pi itself, version 1.5.0 or newer. Mu looks for Pi in the background when it starts and when you open Settings, New thread or Import sessions. Once found, Pi is an agent you can choose, and the default if nothing else is. If it's somewhere other than your `PATH`, enter its path under **Built-in** in Settings. The adapter runs inside Mu and drives `pi --mode rpc`, with one Pi process per open session; each takes roughly 50 to 100 MB.
 
-The optional installation in `.tools/` remains ignored and is not bundled into Mu. Earlier real-provider QA was for the old persistence model; that obsolete test has been removed. Current checks use an offline, stateful ACP fixture and do not use Pi credentials.
+Mu doesn't install Pi or sign in for you. Sign in with Pi itself: run `pi` in a terminal, then `/login`. Without a provider, a thread opens and its history loads, but offers no model and can't send.
+
+- **Project trust.** Pi's RPC mode can't show its trust prompt, and Mu doesn't approve anything on your behalf. In a folder you haven't trusted, Pi silently skips the folder's `.pi` settings, prompts, skills and extensions, so they won't be available in Mu. `AGENTS.md` and `CLAUDE.md` still load. To use them, run `/trust` in Pi in that folder, or set `defaultProjectTrust` in Pi's settings.
+- **File changes.** Pi's edit and write tools report ACP diffs, which appear as a collapsible diff on the tool call. A write doesn't say what it replaced, so all of its text reads as added.
+- **Tool use.** Pi doesn't ask before every tool call, so expect few permission requests. They come only from Pi extensions: a `confirm` or `select` becomes a permission card. An extension's request for text has no equivalent in Mu and is declined.
+- **Slash commands.** The picker shows Pi's prompt templates, skills and extension commands, plus `/compact`. Pi's other terminal commands, such as `/model` and `/tree`, don't work over RPC: typed anyway, they'd reach the model as plain text.
+- **Sessions** stay Pi's, in its usual session files, so Import lists them and Pi can open sessions made in Mu. A session gets its file with its first turn. Until then Mu keeps a small marker in its data directory, so a thread you never sent anything in still reopens, while a session deleted from Pi is reported rather than silently replaced.
+- **Using one session in both Mu and Pi at once** isn't coordinated. Neither corrupts it, but each adds its own branch, and reopening shows the one written last. The other stays in Pi's `/tree`.
 
 ## Discovery and thread semantics
 
@@ -124,7 +133,7 @@ Mu is a greenfield project with no established data model and no users depending
 
 **Mu is not a sandbox.** Agent executables inherit your environment and run with your user permissions. Only run agents and commands you trust. Permission controls answer requests the agent actually sends; Mu cannot force every agent tool to request approval. Mu performs no file access or command execution on an agent's behalf. On Unix, cleanup terminates the agent's process group; on Windows only direct child termination is implemented.
 
-Mu sends no telemetry. Its only network activity is `gh pr view` above, made by your own `gh` with your own credentials, and only when `gh` is installed. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
+Mu sends no telemetry. Its only network activity of its own is `gh pr view` above, made by your own `gh` with your own credentials, and only when `gh` is installed. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
 
 ## Check
 
@@ -153,7 +162,10 @@ MU_QA_RENDER_DIR="$PWD/.qa/motion" go test ./internal/desktop -run '^TestRecordM
 - `main.go`: startup and native window lifecycle.
 - `internal/desktop`: MyGo views and headless interaction tests.
 - `internal/app`: thread lifecycle and streamed update handling.
-- `internal/agent`: ACP Go SDK integration and the agent child process.
+- `internal/agent`: ACP Go SDK integration and the agent behind a connection, a child process or a server inside Mu.
+- `internal/piacp`: the built-in ACP adapter for Pi.
+- `internal/builtins`: what's particular to each built-in agent, such as its facts and how to detect it.
+- `internal/textdiff`: bounded line diffs for display.
 - `internal/state`: session references, atomic storage and locking.
 - `GLOSSARY.md`: session ownership and discovery/import terminology.
 

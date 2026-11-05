@@ -47,3 +47,25 @@ Separately, the read loop completes responses immediately while notifications wa
 **Workaround in Mu:** `selectValue` in `internal/desktop/view.go` accepts both.
 
 **When the SDK uses one type:** simplify `selectValue` to that type.
+
+## Pi adapter
+
+### Listing reads Pi's session files
+
+**Problem:** Pi's RPC mode has no command to list sessions, and its `SessionManager.list()` is TypeScript only. `internal/piacp/sessions.go` reads the JSONL files directly, which ties it to their format. Files it can't read are skipped, so a format change would show as sessions going missing from Import rather than as an error.
+
+**When Pi's RPC mode can list sessions:** use that, and remove the file reading.
+
+### A write shows all its text as added
+
+**Problem:** Pi's `write` tool reports neither what it replaced nor a patch. The adapter can't read the file itself first, because its view of the tool starting can lag behind the write. So overwriting a file reads as adding all of its lines.
+
+**When Pi reports a patch for writes:** `patchDiffs` picks it up without any change.
+
+### Permission requests are assumed to be about the running tool
+
+**Problem:** An extension's dialog carries no tool call ID, so `askClient` assumes it's about the tool now running. With tools running in parallel, it can name the wrong one.
+
+### Terminal commands typed into a thread reach the model
+
+**Problem:** Pi's RPC mode sends `/model`, `/tree` and the like to the model as plain text. The picker doesn't offer them, but nothing stops someone typing one. Only `/compact` is intercepted.

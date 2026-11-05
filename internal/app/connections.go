@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"slices"
 	"time"
 
 	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
-	"github.com/spachava753/mu/internal/state"
 )
 
 // connection is one agent process shared by every thread whose sessions use
@@ -122,12 +120,17 @@ func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 	if err != nil {
 		err = fmt.Errorf("working directory: %w", err)
 	} else {
-		p, err = agent.Start(ctx, command, cwd, agent.Hooks{
+		hooks := agent.Hooks{
 			Update: func(n acp.SessionNotification) { a.route(c, n) },
 			Permission: func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 				return a.routePermission(ctx, c, req)
 			},
-		})
+		}
+		if name, builtin := agent.BuiltinName(command); builtin {
+			p, err = a.serveBuiltin(ctx, name, cwd, hooks)
+		} else {
+			p, err = agent.Start(ctx, command, cwd, hooks)
+		}
 	}
 	a.mu.Lock()
 	// Retirement is final, even if the configuration is saved again meanwhile.
@@ -138,6 +141,9 @@ func (a *App) start(ctx context.Context, c *connection, command, cwd string) {
 	c.process, c.err = p, err
 	if err != nil && a.connections[c.key] == c {
 		delete(a.connections, c.key)
+	}
+	if name, builtin := agent.BuiltinName(command); builtin && err != nil {
+		a.requestCheckLocked(name) // It may be why this failed, and worth saying so.
 	}
 	if unused && p != nil {
 		a.stopLocked(c.key, p.Close)
@@ -334,9 +340,11 @@ func (a *App) unblockAtShutdown(c *connection) (finished func()) {
 // opening threads, closing sessions and discovery do not restart it. One-off
 // commands and older command snapshots stop with their last user.
 func (a *App) keepLocked(key [2]string) bool {
-	return !a.closed && slices.ContainsFunc(a.data.Agents, func(c state.AgentConfig) bool {
-		return c.ID == key[0] && c.Command == key[1]
-	})
+	if a.closed {
+		return false
+	}
+	config, ok := a.agentConfigLocked(key[0])
+	return ok && config.Command == key[1]
 }
 
 // stopIdleLocked terminates idle connections that are no longer kept. The

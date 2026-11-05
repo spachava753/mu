@@ -335,7 +335,7 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(out, sep)
 }
 
-type choice struct{ ID, Name, Description, Group string }
+type choice struct{ ID, Name, Description, Group, Note string }
 
 // Keep protocol IDs separate from labels, including duplicate labels and groups.
 func selectChoice(c *ui.Context, label string, value string, options []choice, disabled bool, changed func(string)) {
@@ -411,6 +411,9 @@ func selectControl(c *ui.Context, label, field, about string, value string, opti
 				}
 				item.Children(func() {
 					ui.Text(c, o.Name).SingleLine().Grow(1).MinWidth(0)
+					if o.Note != "" {
+						ui.Text(c, o.Note).FontSize(11.5).TextColor(faint(t)).SingleLine().Shrink(0)
+					}
 					check := ui.Icon(c, checkIcon).Size(14, 14).TextColor(t.TextMuted)
 					if o.ID != value {
 						check.Opacity(0)

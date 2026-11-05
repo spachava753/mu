@@ -20,6 +20,7 @@ import (
 	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/agent"
 	"github.com/spachava753/mu/internal/state"
+	"github.com/spachava753/mu/internal/textdiff"
 	"github.com/spachava753/mu/internal/workspace"
 )
 
@@ -38,6 +39,7 @@ type Permission struct {
 // PermissionTool is the visible description of a permission request's tool call.
 type PermissionTool struct {
 	Title, Kind, Text, Details string
+	Diffs                      []textdiff.File
 }
 
 // Conversation is a transient projection of agent replay and live updates.
@@ -72,6 +74,7 @@ type Snapshot struct {
 	Catalog                   Catalog
 	LifecycleError            string
 	Agents                    []state.AgentConfig
+	Builtins                  []BuiltinView
 	Projects                  []state.Project
 	DefaultAgentID            string
 	SidebarCollapsed          bool
@@ -85,7 +88,8 @@ var errAppClosing = errors.New("app is closing")
 
 type pending struct {
 	Permission
-	seq       uint64 // order in which Mu received the request
+	diffs     []textdiff.File // of the request's own content, if any
+	seq       uint64          // order in which Mu received the request
 	answer    chan acp.PermissionOptionId
 	cancelled chan struct{}
 }
@@ -172,6 +176,8 @@ type App struct {
 	catalogCancel     context.CancelFunc
 	catalogGeneration uint64
 	defaultWorkingDir string
+	builtins          []Builtin // fixed once the app has opened
+	builtinRuntimes   map[string]*builtinRuntime
 	// agentDeadline bounds how long a stopping turn or closing session may
 	// take before Mu terminates the agent process. Cancelling can involve
 	// finishing a tool call or other cleanup in the agent, so it is generous.
@@ -186,14 +192,17 @@ type App struct {
 const AgentDeadline = 10 * time.Second
 
 // Open loads Mu's data from dir. New threads get folders in defaultWorkingDir
-// until the user chooses another general working directory.
-func Open(dir, defaultWorkingDir string) (*App, error) {
+// until the user chooses another general working directory. The built-in agents
+// given are available in addition to saved ones, and are checked in the background
+// from now on.
+func Open(dir, defaultWorkingDir string, builtins ...Builtin) (*App, error) {
 	store, data, err := state.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1), pullRequests: map[[2]string]workspace.PullRequest{}, pullRequestWake: make(chan struct{}, 1)}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, builtins: slices.Clone(builtins), builtinRuntimes: map[string]*builtinRuntime{}, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1), pullRequests: map[[2]string]workspace.PullRequest{}, pullRequestWake: make(chan struct{}, 1)}
 	a.ctx, a.cancelCtx = context.WithCancel(context.Background())
+	a.startBuiltins()
 	a.wg.Add(1)
 	go a.watchWorkspace()
 	a.wg.Add(1)
@@ -261,7 +270,7 @@ func (a *App) runtimeLocked(id string) *runtime {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.data.DefaultAgentID, SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
+	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Builtins: a.builtinViewsLocked(), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.defaultAgentLocked(), SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
 	for _, t := range a.data.Threads {
 		t.AdditionalDirectories = slices.Clone(t.AdditionalDirectories)
 		git := a.workspaces[t.Cwd]
@@ -285,7 +294,7 @@ func (a *App) Snapshot() Snapshot {
 					// While loading, the session's updates are still buffered.
 					known = bufferedTool(r.initialUpdates, toolID)
 				}
-				permission.Tool = permissionTool(known, p.Request.ToolCall)
+				permission.Tool = permissionTool(known, p.Request.ToolCall, p.diffs)
 				v.Permissions = append(v.Permissions, permission)
 			}
 		}
@@ -321,7 +330,9 @@ func (a *App) create(command, agentID, agentName, projectID string) (string, err
 	t := state.Thread{ID: state.ID(), Title: "New thread", Command: command, AgentID: agentID, AgentName: agentName, ProjectID: projectID, Cwd: cwd, Created: time.Now(), Updated: time.Now()}
 	a.data.Threads = append(a.data.Threads, t)
 	oldCmd := a.data.LastCommand
-	a.data.LastCommand = command
+	if _, builtin := agent.BuiltinName(command); !builtin {
+		a.data.LastCommand = command // What to prefill for another one-off command.
+	}
 	if err := a.saveLocked(); err != nil {
 		a.data.Threads = a.data.Threads[:len(a.data.Threads)-1]
 		a.data.LastCommand = oldCmd
@@ -833,6 +844,9 @@ func (a *App) permission(ctx context.Context, id string, r *runtime, epoch uint6
 	}
 	a.permissionSeq++
 	p := &pending{Permission: Permission{ID: state.ID(), Request: req}, seq: a.permissionSeq, answer: make(chan acp.PermissionOptionId, 1), cancelled: make(chan struct{})}
+	if content := req.ToolCall.Content; content != nil {
+		p.diffs = toolDiffs(*content)
+	}
 	r.pending[p.ID] = p
 	a.notifyLocked()
 	a.mu.Unlock()

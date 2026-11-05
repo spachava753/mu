@@ -36,14 +36,19 @@ func (a *App) SaveAgent(config state.AgentConfig, makeDefault bool) (string, err
 		return "", errors.New("agent configuration not found")
 	}
 	old, oldDefault := slices.Clone(a.data.Agents), a.data.DefaultAgentID
+	current := a.defaultAgentLocked()
 	if index < 0 {
 		config.ID = state.ID()
 		a.data.Agents = append(a.data.Agents, config)
 	} else {
 		a.data.Agents[index] = config
 	}
-	if makeDefault || a.data.DefaultAgentID == "" {
+	// Adding an agent leaves the default alone unless asked: whatever is in effect
+	// stays so, even a built-in nobody chose. With nothing in effect, this is it.
+	if makeDefault || current == "" {
 		a.data.DefaultAgentID = config.ID
+	} else if a.data.DefaultAgentID == "" {
+		a.data.DefaultAgentID = current
 	}
 	if err := a.saveLocked(); err != nil {
 		a.data.Agents, a.data.DefaultAgentID = old, oldDefault
@@ -85,7 +90,7 @@ func (a *App) SetDefaultAgent(id string) error {
 	if a.closed {
 		return errors.New("app is closing")
 	}
-	if !slices.ContainsFunc(a.data.Agents, func(c state.AgentConfig) bool { return c.ID == id }) {
+	if _, ok := a.agentConfigLocked(id); !ok {
 		return errors.New("agent configuration not found")
 	}
 	old := a.data.DefaultAgentID
@@ -154,19 +159,13 @@ func (a *App) SetWorkingDirectory(dir string) error {
 	return nil
 }
 
-// CreateWithAgent starts a thread with a saved agent, in the project's folder
-// or, without a project, in a new folder of the general working directory.
+// CreateWithAgent starts a thread with a saved or built-in agent, in the project's
+// folder or, without a project, in a new folder of the general working directory.
 func (a *App) CreateWithAgent(agentID, projectID string) (string, error) {
 	a.mu.Lock()
-	var config state.AgentConfig
-	for _, c := range a.data.Agents {
-		if c.ID == agentID {
-			config = c
-			break
-		}
-	}
+	config, ok := a.agentConfigLocked(agentID)
 	a.mu.Unlock()
-	if config.ID == "" {
+	if !ok {
 		return "", errors.New("choose a configured agent in Settings")
 	}
 	return a.create(config.Command, config.ID, config.Name, projectID)

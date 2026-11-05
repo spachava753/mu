@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/shlex"
 	"github.com/spachava753/acp-sdk/acp"
+	"github.com/spachava753/acp-sdk/jsonrpc"
+	"github.com/spachava753/mu/internal/procgroup"
 )
 
 type Hooks struct {
@@ -22,10 +24,10 @@ type Hooks struct {
 	Permission func(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
 }
 
+// Process is a running ACP agent, whether a child process or a Server inside Mu.
 type Process struct {
 	Conn   *acp.Client
 	Info   acp.InitializeResponse
-	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr *tailBuffer
@@ -38,6 +40,8 @@ type Process struct {
 	once   sync.Once
 	lifeMu sync.Mutex
 	hooks  Hooks
+	// How to end the agent: politely, then at once.
+	terminate, forceKill func()
 }
 
 func ParseCommand(command string) ([]string, error) {
@@ -51,52 +55,44 @@ func ParseCommand(command string) ([]string, error) {
 	return args, nil
 }
 
+func newProcess(hooks Hooks) *Process {
+	return &Process{hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), ended: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, diag: &tailBuffer{limit: 4096}}
+}
+
+// Start runs a command as an agent and initializes its ACP connection.
 func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, error) {
 	args, err := ParseCommand(command)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Dir = cwd
-	prepareProcess(cmd)
-	cmd.WaitDelay = time.Second
-	p := &Process{cmd: cmd, hooks: hooks, done: make(chan struct{}), closed: make(chan struct{}), ended: make(chan struct{}), stderr: &tailBuffer{limit: 8192}, diag: &tailBuffer{limit: 4096}}
-	cmd.Stderr = p.stderr
-	p.stdin, err = cmd.StdinPipe()
+	p := newProcess(hooks)
+	wait, err := p.exec(args, cwd)
 	if err != nil {
 		return nil, err
 	}
-	// Own the read end: exec.Wait must not close it before the ACP reader
-	// consumes a final response from an agent that exits immediately afterward.
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		_ = p.stdin.Close()
-		return nil, err
-	}
-	p.stdout, cmd.Stdout = reader, writer
-	if err = cmd.Start(); err != nil {
-		_ = p.stdin.Close()
-		_ = reader.Close()
-		_ = writer.Close()
-		return nil, fmt.Errorf("start agent: %w", err)
-	}
-	_ = writer.Close()
+	return p.connect(ctx, wait)
+}
+
+// connect runs the ACP connection over the streams already set up, wait being what
+// returns when the agent has ended.
+func (p *Process) connect(ctx context.Context, wait func()) (*Process, error) {
 	// Requests the agent sends live as long as the process, not this startup.
 	lifetime, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
+	var err error
 	p.Conn, err = acp.Connect(lifetime, transport{p}, handler{p})
 	if err != nil {
 		cancel()
 		_ = p.stdin.Close()
 		_ = p.stdout.Close()
-		killProcess(cmd)
-		_ = cmd.Wait()
+		p.forceKill()
+		wait()
 		return nil, fmt.Errorf("connect agent: %w", err)
 	}
 	go func() {
-		_ = cmd.Wait()
+		wait()
 		p.lifeMu.Lock()
-		killProcess(cmd) // Terminate descendants left in this process group.
+		p.forceKill() // End descendants left in this process group.
 		close(p.done)
 		p.lifeMu.Unlock()
 	}()
@@ -125,6 +121,37 @@ func Start(ctx context.Context, command, cwd string, hooks Hooks) (*Process, err
 	return p, nil
 }
 
+// exec starts the agent as a child process.
+func (p *Process) exec(args []string, cwd string) (wait func(), err error) {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = cwd
+	procgroup.Prepare(cmd)
+	cmd.WaitDelay = time.Second
+	cmd.Stderr = p.stderr
+	p.stdin, err = cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	// Own the read end: exec.Wait must not close it before the ACP reader
+	// consumes a final response from an agent that exits immediately afterward.
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		_ = p.stdin.Close()
+		return nil, err
+	}
+	p.stdout, cmd.Stdout = reader, writer
+	if err = cmd.Start(); err != nil {
+		_ = p.stdin.Close()
+		_ = reader.Close()
+		_ = writer.Close()
+		return nil, fmt.Errorf("start agent: %w", err)
+	}
+	_ = writer.Close()
+	p.terminate = func() { procgroup.Terminate(cmd) }
+	p.forceKill = func() { procgroup.Kill(cmd) }
+	return func() { _ = cmd.Wait() }, nil
+}
+
 // ProtocolVersion is the ACP version Mu speaks.
 const ProtocolVersion acp.ProtocolVersion = 1
 
@@ -139,9 +166,15 @@ func (p *Process) Alive() bool {
 	}
 }
 
+// Error describes a failed request for a person: what the agent answered, without
+// the SDK's account of the call it answered, plus anything it wrote to stderr.
 func (p *Process) Error(err error) error {
 	if err == nil {
 		return nil
+	}
+	var response *jsonrpc.Error
+	if errors.As(err, &response) {
+		err = response
 	}
 	if output := p.stderr.snapshot(); strings.TrimSpace(output) != "" {
 		err = fmt.Errorf("%w\nAgent stderr:\n%s", err, output)
@@ -171,13 +204,13 @@ func (p *Process) shutdown(graceful bool) {
 	p.once.Do(func() {
 		close(p.closed)
 		_ = p.stdin.Close()
-		signal := func(send func(*exec.Cmd)) {
+		signal := func(send func()) {
 			p.lifeMu.Lock()
 			defer p.lifeMu.Unlock()
 			select {
 			case <-p.done:
 			default:
-				send(p.cmd)
+				send()
 			}
 		}
 		exited := func(grace time.Duration) bool {
@@ -189,10 +222,10 @@ func (p *Process) shutdown(graceful bool) {
 			}
 		}
 		if graceful && !exited(exitGrace) {
-			signal(terminateProcess)
+			signal(p.terminate)
 			exited(terminateGrace)
 		}
-		signal(killProcess)
+		signal(p.forceKill)
 		_ = p.stdout.Close()
 		p.cancel()
 		select {
