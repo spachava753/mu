@@ -223,7 +223,7 @@ func (a *App) stopLocked(key [2]string, stop func()) {
 // session it creates late is closed. Only closing the app cancels it; a
 // request still outstanding a deadline later, such as a write blocked on an
 // agent that stopped reading, then closes the process.
-func awaitCreation[T any](a *App, c *connection, timeout time.Duration, request func(context.Context) (T, error), created func(T) acp.SessionId) (T, error) {
+func awaitCreation[T any](a *App, c *connection, cwd string, timeout time.Duration, request func(context.Context) (T, error), created func(T) acp.SessionId) (T, error) {
 	a.mu.Lock()
 	c.users++ // The request's own reference, released when it ends.
 	deadline := a.agentDeadline
@@ -249,10 +249,19 @@ func awaitCreation[T any](a *App, c *connection, timeout time.Duration, request 
 		return o.value, o.err
 	case <-timer.C:
 	}
+	// Until it settles, the agent may be setting up a session in that folder.
+	a.mu.Lock()
+	unsettled := a.trackUnsettledLocked(c, cwd)
+	a.mu.Unlock()
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		defer a.release(c)
+		defer func() {
+			a.mu.Lock()
+			a.finishFolderCloseLocked(unsettled, nil)
+			a.mu.Unlock()
+		}()
 		o := <-done
 		if o.err != nil || created(o.value) == "" {
 			return
@@ -273,7 +282,7 @@ func awaitCreation[T any](a *App, c *connection, timeout time.Duration, request 
 		closing := make(chan struct{})
 		a.closingSessions[identity] = closing
 		a.mu.Unlock()
-		err := c.process.CloseSession(session, deadline)
+		err := a.closeInFolder(c, session, cwd, deadline)
 		a.mu.Lock()
 		if a.closingSessions[identity] == closing {
 			delete(a.closingSessions, identity)

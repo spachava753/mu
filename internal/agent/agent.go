@@ -166,6 +166,17 @@ func (p *Process) Alive() bool {
 	}
 }
 
+// Exited reports whether the agent has actually ended. Alive stops being true as soon
+// as Mu begins shutting it down, while the agent may still be at work.
+func (p *Process) Exited() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // Error describes a failed request for a person: what the agent answered, without
 // the SDK's account of the call it answered, plus anything it wrote to stderr.
 func (p *Process) Error(err error) error {

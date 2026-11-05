@@ -12,6 +12,11 @@ import (
 // Prepare makes cmd the leader of a new process group.
 func Prepare(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
 
+// PrepareDetached also leaves the controlling terminal, in a new session that cmd
+// leads. In a mere background group, a program asking the terminal for a password
+// would stop until someone noticed, rather than fail.
+func PrepareDetached(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} }
+
 // Terminate asks cmd's group to exit.
 func Terminate(cmd *exec.Cmd) {
 	if cmd.Process != nil {

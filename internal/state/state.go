@@ -105,7 +105,9 @@ type Data struct {
 	SidebarWidth     float32                    `json:"sidebarWidth,omitempty"`
 	LastCommand      string                     `json:"lastCommand,omitempty"`
 	WorkingDirectory string                     `json:"workingDirectory,omitempty"`
-	Threads          []Thread                   `json:"threads"`
+	// WorktreeTemplate is where new worktrees go; empty for the default.
+	WorktreeTemplate string   `json:"worktreeTemplate,omitempty"`
+	Threads          []Thread `json:"threads"`
 }
 
 func ID() string {

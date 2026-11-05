@@ -533,7 +533,7 @@ func TestShutdownJoinsBlockedCreation(t *testing.T) {
 		}
 		return nil, errors.New("connection closed")
 	}
-	if _, err := awaitCreation(a, c, 50*time.Millisecond, blocked, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID }); err == nil {
+	if _, err := awaitCreation(a, c, t.TempDir(), 50*time.Millisecond, blocked, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID }); err == nil {
 		t.Fatal("blocked creation did not time out")
 	}
 	a.release(c) // Only the request's own reference remains.
@@ -668,7 +668,7 @@ func TestLateCleanupKeepsExistingClose(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		return &acp.NewSessionResponse{SessionID: "late"}, nil
 	}
-	if _, err := awaitCreation(a, c, 10*time.Millisecond, late, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID }); err == nil {
+	if _, err := awaitCreation(a, c, t.TempDir(), 10*time.Millisecond, late, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID }); err == nil {
 		t.Fatal("creation did not time out")
 	}
 	a.release(c)

@@ -2,7 +2,7 @@
 
 A small ACP desktop client, written entirely in Go with [MyGo](https://github.com/egoist/mygo)'s native `ui` package. No TypeScript, HTML, webview, or frontend build step.
 
-- Create independent threads using compatible locally installed **stdio ACP v1 agent commands**. Each thread works in its own new folder in a general **working directory**, or in a **project**'s shared folder.
+- Create independent threads using compatible locally installed **stdio ACP v1 agent commands**. Each thread works in its own new folder in a general **working directory**, or in a **project**'s shared folder, or in a **Git worktree** of the project's repository.
 - Save named agents and a default in **Settings**; reuse them when creating threads.
 - Collapse the thread sidebar; hover and selected-thread highlights remain distinct.
 - Use a matte, native interface that follows the desktop's light/dark appearance, with short transitions for panels, menus, and navigation.
@@ -46,7 +46,34 @@ Choose **New thread**, select an agent and optionally a project, and **Create th
 
 Without a project, each new thread gets its own randomly named folder (such as `2026-10-21-3fa9c2`) in the general **working directory**, `~/mu` unless you choose another absolute path in **Settings**. Mu creates the folder when it creates the thread. Changing the working directory affects only new threads.
 
-A **project** is a name for an existing folder. Every thread created in a project works directly in that folder, so its threads share files. Choose **New project** in the sidebar, or beside **Project** when creating a thread, and pick a folder with **Choose…** or type its path. Once a project exists, the sidebar lists it, even with no threads yet, with its own buttons to start a thread in it and to edit or remove it (also in its context menu and in **Settings**). When creating a thread, choose one under **Project**; a new thread starts in the project of the thread you were viewing. Imported sessions whose working directory is a project's folder join that project. Removing a project asks first and removes only Mu's entry: its threads keep their folder and session, and Mu never deletes a project folder. Mu never deletes thread folders either.
+A **project** is a name for an existing folder. A thread created in a project works directly in that folder, sharing its files with the project's other threads, unless it uses a [worktree](#worktrees). Choose **New project** in the sidebar, or beside **Project** when creating a thread, and pick a folder with **Choose…** or type its path. Once a project exists, the sidebar lists it, even with no threads yet, with its own buttons to start a thread in it and to edit or remove it (also in its context menu and in **Settings**). When creating a thread, choose one under **Project**; a new thread starts in the project of the thread you were viewing. Imported sessions whose working directory is a project's folder, or one of its repository's worktrees, join that project. Removing a project asks first and removes only Mu's entry: its threads keep their folder and session, and Mu never deletes a project folder. Mu never deletes thread folders either, except a worktree you delete.
+
+## Worktrees
+
+When a project's folder is in a Git repository, the new-thread form also asks what to **work on**, with one search box over these choices. **Project folder** is still the default and changes nothing.
+
+| Choice | Pick it to… | What happens |
+|---|---|---|
+| **New branch** | Start a task | A new worktree on a new branch, from the remote's freshly fetched default branch, or from what you enter under **Start from**: a branch, a commit, or a tag you've fetched. Type a name, or leave it empty for an automatic one such as `mu/2026-11-05-3fa9c2`. The branch has no upstream until you or the agent push it. If the fetch fails, it starts from the last fetched copy and says so. |
+| **Worktrees** | Reuse a checkout | The thread works in that worktree as it is, sharing its files with anything else there. No Git changes. |
+| **Pull requests** | Review or continue one | Works on the pull request's branch, exactly as under **Branches**, so you can push to it. A pull request from a fork, one whose branch is gone, or any without `gh` gets a new worktree detached at its head commit, shown by its short SHA. The list comes from `gh`. Without it, type `#123`. |
+| **Branches** | Resume a branch | A local branch gets a new worktree, and fast-forwards to its upstream if it is only behind; it never moves otherwise. A branch only on a remote is fetched and tracked. A branch already checked out, which you can also type, uses that checkout. |
+
+A sentence below the list says what creating the thread will do, with any warnings, such as unpushed commits. Problems that can be predicted, such as an invalid name or a branch that exists, say so there and block **Create thread**; others, such as a folder you can't write to, are reported when they happen. Nothing is changed until then, and Mu plans again at that moment in case something moved. While a worktree is set up its project shows it in the sidebar, and you can go on working or start other threads; creating and removing worktrees run one at a time, so they can't race for a folder or a ref, while a slow fetch or submodule holds up only its own thread. Quitting gives a checkout or removal under way up to 30 seconds to finish, as interrupting Git would leave a worktree it needs help to repair. In the sidebar, a thread in a worktree shows its branch.
+
+**Where they go.** New worktrees go in `worktrees/{repo}/{branch}` in the working directory. To change that, set **Worktree folder** in Settings to a complete path using `{repo}` (the primary checkout's folder name), `{repoPath}` (the checkout's path), `{checkoutParent}` (its parent) and `{branch}` (with `/` and other unsafe characters replaced by `-`). A leading `~` means your home folder, and a relative path starts at the checkout, so `../{repo}.{branch}` puts them beside it. A folder that exists is never reused: the name gets `-2`, `-3` and so on. If the project's folder is a subfolder of the repository, threads work in the same subfolder of the worktree, if the branch has it.
+
+**Ready to run.** A new worktree gets its submodules initialized, and the untracked files matched by a tracked `.worktreeinclude`, such as `.env`, are copied from the project's checkout. Copying takes regular files only, follows no symlinks, and never replaces a file. A failure in either is reported and doesn't stop the thread. A detached pull request's worktree gets neither, as what these files name would come from code under review. Git's own hooks and filters run as they do for any checkout.
+
+**Deleting.** **Delete worktree…** is in a thread's menus and in **Worktrees…** in a project's menu, which lists its checkouts, including those made outside Mu, and can start a thread in one. It asks first, then:
+
+1. Refuses, with nothing changed, if the worktree has uncommitted changes or untracked files, files marked assume-unchanged or skip-worktree (outside a sparse checkout), a lock, commits added on a detached HEAD that no branch or tag has, or a submodule with changes or commits of its own: on a local branch, stashed, under a tag its remote doesn't have, or at a HEAD that neither its remote nor a published commit of the repository has. That includes submodules deinitialized since, whose repositories go too, and a submodule that has worktrees of its own, which depend on its repository. If those commits aren't yours, or Mu can't tell, `git worktree remove --force` is always there. Ignored files, such as build output, are deleted with it. A thread that is running also stops it.
+2. Closes the sessions of the threads in it, and waits for that. An agent that refuses and keeps running stops the deletion, now and on later tries, even after its thread is removed from Mu, until it closes the session or stops. As when archiving, one that doesn't answer within ten seconds is terminated, which disconnects its other sessions too. Meanwhile nothing new can start using the folder.
+3. Runs `git worktree remove`, and archives those threads, whose sessions stay with the agent. Their folder is gone, so restoring one works only as far as the agent copes with that, and an error says so. Other worktrees and threads carry on.
+
+Its branch stays, unless you also choose to delete it, and even then `git branch -d` keeps a branch that isn't fully merged. Mu can't delete the primary checkout or a folder a project uses. The only time Mu passes `--force` is a repository with submodules, where Git refuses every worktree without it: the checks above have passed by then, and a lock still stops it. Mu never pushes.
+
+Mu runs Git with your configuration and credentials. A remote that asks for a password in a terminal simply fails. Fetches request a single ref, with no tags, pruning or submodules, and the only refs Mu overwrites are remote-tracking ones. Mu keeps no refs of its own. A pull request is fetched from the remote of the repository `gh` names, on the same host if one is, and the sentence says which. Tracking a branch that a single-branch clone doesn't fetch adds it to what that remote fetches.
 
 ## Agent connections
 
@@ -104,6 +131,7 @@ Mu doesn't install Pi or sign in for you. Sign in with Pi itself: run `pi` in a 
 - **Tool use.** Pi doesn't ask before every tool call, so expect few permission requests. They come only from Pi extensions: a `confirm` or `select` becomes a permission card. An extension's request for text has no equivalent in Mu and is declined.
 - **Slash commands.** The picker shows Pi's prompt templates, skills and extension commands, plus `/compact`. Pi's other terminal commands, such as `/model` and `/tree`, don't work over RPC: typed anyway, they'd reach the model as plain text.
 - **Sessions** stay Pi's, in its usual session files, so Import lists them and Pi can open sessions made in Mu. A session gets its file with its first turn. Until then Mu keeps a small marker in its data directory, so a thread you never sent anything in still reopens, while a session deleted from Pi is reported rather than silently replaced.
+- **Deleted worktrees.** Pi can't start in a folder that's gone, so a thread whose worktree was deleted says so instead of reconnecting. Its conversation stays in Pi's session files.
 - **Using one session in both Mu and Pi at once** isn't coordinated. Neither corrupts it, but each adds its own branch, and reopening shows the one written last. The other stays in Pi's `/tree`.
 
 ## Discovery and thread semantics
@@ -133,7 +161,7 @@ Mu is a greenfield project with no established data model and no users depending
 
 **Mu is not a sandbox.** Agent executables inherit your environment and run with your user permissions. Only run agents and commands you trust. Permission controls answer requests the agent actually sends; Mu cannot force every agent tool to request approval. Mu performs no file access or command execution on an agent's behalf. On Unix, cleanup terminates the agent's process group; on Windows only direct child termination is implemented.
 
-Mu sends no telemetry. Its only network activity of its own is `gh pr view` above, made by your own `gh` with your own credentials, and only when `gh` is installed. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
+Mu sends no telemetry. Its only network activity of its own is `gh pr view` above, and for a project in a repository, `git ls-remote` and `gh pr list` when you open the new-thread form and `git fetch` when you start a thread that needs it: all made by your own `git` and `gh`, with your own credentials. Agent processes may use their own network services. Saved commands, titles, and workspace paths can contain sensitive data; the local registry is not encrypted. Agent-owned histories follow the agent’s own storage policy.
 
 ## Check
 
@@ -143,7 +171,7 @@ go vet ./...
 go build -o bin/mu .
 ```
 
-The normal suite needs no credentials or model calls. It includes a real stdio fixture process, settings persistence, session configuration and updates, agent replay and native fork behavior, paginated discovery/selective import, external deletion, permissions, graceful and forced cancellation, agent failures, and MyGo headless interaction tests at 1100×780 and 800×600. The UI tests exercise row highlights, sidebar collapse, saved agents, session option changes, 100-model menus, and slash completion with 80 commands using mouse and keyboard.
+The normal suite needs no credentials or model calls. It includes a real stdio fixture process, settings persistence, session configuration and updates, agent replay and native fork behavior, paginated discovery/selective import, external deletion, permissions, graceful and forced cancellation, agent failures, worktree creation and deletion against real local repositories, and MyGo headless interaction tests at 1100×780 and 800×600. The UI tests exercise row highlights, sidebar collapse, saved agents, session option changes, 100-model menus, and slash completion with 80 commands using mouse and keyboard.
 
 To save native-renderer QA screenshots in both sizes and themes:
 
@@ -166,6 +194,8 @@ MU_QA_RENDER_DIR="$PWD/.qa/motion" go test ./internal/desktop -run '^TestRecordM
 - `internal/piacp`: the built-in ACP adapter for Pi.
 - `internal/builtins`: what's particular to each built-in agent, such as its facts and how to detect it.
 - `internal/textdiff`: bounded line diffs for display.
+- `internal/workspace`: a folder's git state and pull request, for display.
+- `internal/worktree`: listing, planning, creating and removing a repository's worktrees.
 - `internal/state`: session references, atomic storage and locking.
 - `GLOSSARY.md`: session ownership and discovery/import terminology.
 

@@ -210,6 +210,9 @@ func (a *App) Import(generation uint64, sessionIDs []string) ([]string, error) {
 			continue
 		}
 		s := c.Sessions[index]
+		if err := a.checkFolderLocked(s.Cwd); err != nil {
+			return nil, err
+		}
 		title := s.Title
 		if title == "" {
 			title = s.ID

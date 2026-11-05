@@ -58,6 +58,9 @@ func (a *App) SaveProject(project state.Project) (string, error) {
 	if a.closed {
 		return "", errAppClosing
 	}
+	if err := a.checkFolderLocked(project.Dir); err != nil {
+		return "", err
+	}
 	index := -1
 	for i, existing := range a.data.Projects {
 		if existing.ID == project.ID {
@@ -80,6 +83,7 @@ func (a *App) SaveProject(project state.Project) (string, error) {
 		a.data.Projects = old
 		return "", err
 	}
+	a.refreshWorktreesLocked(project.ID, false)
 	return project.ID, nil
 }
 
@@ -106,13 +110,21 @@ func (a *App) RemoveProject(id string) error {
 		a.data.Projects, a.data.Threads = oldProjects, oldThreads
 		return err
 	}
+	a.setWorktreesLocked(id, nil)
 	return nil
 }
 
-// projectForDirLocked finds the project whose folder is dir, if any.
+// projectForDirLocked finds the project whose folder is dir, or whose repository
+// has it as a worktree, as last listed. A project's own folder comes first.
 func (a *App) projectForDirLocked(dir string) string {
+	dir = filepath.Clean(dir)
 	for _, p := range a.data.Projects {
-		if p.Dir == filepath.Clean(dir) {
+		if p.Dir == dir {
+			return p.ID
+		}
+	}
+	for _, p := range a.data.Projects {
+		if a.worktrees[p.ID].lookup(dir).Path != "" {
 			return p.ID
 		}
 	}

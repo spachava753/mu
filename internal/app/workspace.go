@@ -65,6 +65,7 @@ func (a *App) watchWorkspace() {
 			a.readWorkspace()
 			a.wakePullRequest()
 		}
+		a.refreshFocusedWorktrees()
 	}
 }
 

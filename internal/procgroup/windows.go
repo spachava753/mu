@@ -9,6 +9,9 @@ import "os/exec"
 // Prepare does nothing on Windows.
 func Prepare(*exec.Cmd) {}
 
+// PrepareDetached does nothing on Windows.
+func PrepareDetached(*exec.Cmd) {}
+
 // Terminate does nothing: Windows has no SIGTERM for console processes, so
 // callers go on to Kill.
 func Terminate(*exec.Cmd) {}

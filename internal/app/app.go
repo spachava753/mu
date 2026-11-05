@@ -22,6 +22,7 @@ import (
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/textdiff"
 	"github.com/spachava753/mu/internal/workspace"
+	"github.com/spachava753/mu/internal/worktree"
 )
 
 // Permission is a pending session/request_permission. Request is never
@@ -68,6 +69,10 @@ type ThreadView struct {
 	SessionError string
 	Git          workspace.Git         // as last read, while the thread was in view
 	PullRequest  workspace.PullRequest // of the branch in Git, if known
+	// Worktree is the checkout of the project's repository the thread works in,
+	// unless that is the project's own folder. As last listed.
+	Worktree         worktree.Worktree
+	DeletingWorktree bool
 }
 
 type Snapshot struct {
@@ -82,6 +87,11 @@ type Snapshot struct {
 	Threads                   []ThreadView
 	LastCommand, StorageError string
 	WorkingDirectory          string
+	WorktreeTemplate          string                       // the user's choice; empty for the default
+	DefaultWorktreeTemplate   string                       // in the current working directory
+	Worktrees                 map[string]*ProjectWorktrees // by project; read-only
+	WorktreePreview           WorktreePreview
+	WorktreeOperations        []WorktreeOperation
 }
 
 var errAppClosing = errors.New("app is closing")
@@ -131,6 +141,8 @@ type runtime struct {
 	titleConn                    *connection // the worker's hold on the connection, until the thread detaches
 	configCancel                 context.CancelFunc
 	echo                         promptEcho
+	deletingWorktree             bool   // configuring holds the session back meanwhile
+	cwd                          string // of the session on conn
 }
 
 // live reports whether the thread has an open session on a running process.
@@ -160,6 +172,13 @@ type App struct {
 	workspaceWake   chan struct{}
 	pullRequests    map[[2]string]workspace.PullRequest // the last answer for each folder and branch
 	pullRequestWake chan struct{}
+	worktrees       map[string]*ProjectWorktrees // by project; replaced, never changed
+	worktreeReaders map[string]*worktreeReader
+	worktreeTail    chan struct{} // closed when the last turn for worktree changes ends
+	deletingFolders []string      // canonical paths of worktrees being deleted
+	folderCloses    []*folderClose
+	preview         previewState
+	worktreeOps     []*WorktreeOperation
 	wg              sync.WaitGroup
 	closed          bool
 	dirty           bool
@@ -200,9 +219,14 @@ func Open(dir, defaultWorkingDir string, builtins ...Builtin) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, builtins: slices.Clone(builtins), builtinRuntimes: map[string]*builtinRuntime{}, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1), pullRequests: map[[2]string]workspace.PullRequest{}, pullRequestWake: make(chan struct{}, 1)}
+	a := &App{store: store, data: data, defaultWorkingDir: defaultWorkingDir, builtins: slices.Clone(builtins), builtinRuntimes: map[string]*builtinRuntime{}, agentDeadline: AgentDeadline, discoveryTimeout: DiscoveryTimeout, loadTimeout: LoadTimeout, forkTimeout: forkTimeout, runtimes: map[string]*runtime{}, closingSessions: map[[3]string]chan struct{}{}, connections: map[[2]string]*connection{}, stopping: map[[2]string]chan struct{}{}, changed: make(chan struct{}, 1), stopWriter: make(chan struct{}), workspaces: map[string]workspace.Git{}, workspaceWake: make(chan struct{}, 1), pullRequests: map[[2]string]workspace.PullRequest{}, pullRequestWake: make(chan struct{}, 1), worktrees: map[string]*ProjectWorktrees{}, worktreeReaders: map[string]*worktreeReader{}}
 	a.ctx, a.cancelCtx = context.WithCancel(context.Background())
 	a.startBuiltins()
+	a.mu.Lock()
+	for _, p := range a.data.Projects {
+		a.refreshWorktreesLocked(p.ID, false) // Thread rows name their worktrees.
+	}
+	a.mu.Unlock()
 	a.wg.Add(1)
 	go a.watchWorkspace()
 	a.wg.Add(1)
@@ -270,12 +294,13 @@ func (a *App) runtimeLocked(id string) *runtime {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Builtins: a.builtinViewsLocked(), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.defaultAgentLocked(), SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
+	s := Snapshot{LastCommand: a.data.LastCommand, WorkingDirectory: a.workingDirectoryLocked(), WorktreeTemplate: a.data.WorktreeTemplate, DefaultWorktreeTemplate: a.defaultWorktreeTemplateLocked(), Worktrees: a.worktrees, WorktreePreview: a.preview.WorktreePreview, WorktreeOperations: a.worktreeOperationsLocked(), StorageError: a.storageError, Agents: slices.Clone(a.data.Agents), Builtins: a.builtinViewsLocked(), Projects: slices.Clone(a.data.Projects), DefaultAgentID: a.defaultAgentLocked(), SidebarCollapsed: a.data.SidebarCollapsed, SidebarWidth: a.data.SidebarWidth}
 	for _, t := range a.data.Threads {
 		t.AdditionalDirectories = slices.Clone(t.AdditionalDirectories)
 		git := a.workspaces[t.Cwd]
-		v := ThreadView{Thread: t, Git: git, PullRequest: a.pullRequests[[2]string{t.Cwd, git.Branch}]}
+		v := ThreadView{Thread: t, Git: git, PullRequest: a.pullRequests[[2]string{t.Cwd, git.Branch}], Worktree: a.worktrees[t.ProjectID].lookup(t.Cwd)}
 		if r := a.runtimes[t.ID]; r != nil {
+			v.DeletingWorktree = r.deletingWorktree
 			v.Conversation = r.Conversation
 			v.Entries = slices.Clone(r.Entries)
 			if r.cloneVersion != r.sessionVersion {
@@ -327,6 +352,18 @@ func (a *App) create(command, agentID, agentName, projectID string) (string, err
 	if err != nil {
 		return "", err
 	}
+	id, err := a.addThreadLocked(command, agentID, agentName, projectID, cwd)
+	if err != nil && created {
+		_ = os.Remove(cwd) // Still empty: no agent has used it.
+	}
+	return id, err
+}
+
+// addThreadLocked saves a new thread that works in an existing folder.
+func (a *App) addThreadLocked(command, agentID, agentName, projectID, cwd string) (string, error) {
+	if err := a.checkFolderLocked(cwd); err != nil {
+		return "", err
+	}
 	t := state.Thread{ID: state.ID(), Title: "New thread", Command: command, AgentID: agentID, AgentName: agentName, ProjectID: projectID, Cwd: cwd, Created: time.Now(), Updated: time.Now()}
 	a.data.Threads = append(a.data.Threads, t)
 	oldCmd := a.data.LastCommand
@@ -336,9 +373,6 @@ func (a *App) create(command, agentID, agentName, projectID string) (string, err
 	if err := a.saveLocked(); err != nil {
 		a.data.Threads = a.data.Threads[:len(a.data.Threads)-1]
 		a.data.LastCommand = oldCmd
-		if created {
-			_ = os.Remove(cwd) // Still empty: no agent has used it.
-		}
 		return "", err
 	}
 	return t.ID, nil
@@ -589,7 +623,16 @@ const (
 // connect always loads saved sessions with replay. A cached transcript is not
 // proof of freshness: another client may have changed the agent's history.
 // The session is opened on the shared connection for the thread's agent.
-func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.Process, error) {
+func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (_ *agent.Process, err error) {
+	defer func() {
+		// Its worktree may have been deleted. Then that is the reason, and the agent's
+		// own error would mislead: starting in a missing folder reads as a missing agent.
+		if err != nil && ctx.Err() == nil {
+			if _, statErr := os.Stat(t.Cwd); errors.Is(statErr, fs.ErrNotExist) {
+				err = fmt.Errorf("This thread's folder no longer exists: %s", t.Cwd)
+			}
+		}
+	}()
 	a.mu.Lock()
 	closing := r.closing
 	identity := [3]string{t.AgentID, t.Command, t.SessionID}
@@ -625,7 +668,6 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	}
 	var c *connection
 	var p *agent.Process
-	var err error
 	loading := false
 	for {
 		// Every attempt, including replacements, is within the load deadline.
@@ -690,7 +732,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 		// the session anyway, and only the response says which. The thread
 		// keeps it, and run does not send the stopped prompt.
 		var session *acp.NewSessionResponse
-		session, err = awaitCreation(a, c, a.loadTimeout, func(ctx context.Context) (*acp.NewSessionResponse, error) {
+		session, err = awaitCreation(a, c, t.Cwd, a.loadTimeout, func(ctx context.Context) (*acp.NewSessionResponse, error) {
 			return p.Conn.SessionNew(ctx, &acp.NewSessionRequest{Cwd: t.Cwd, McpServers: []acp.McpServer{}})
 		}, func(s *acp.NewSessionResponse) acp.SessionId { return s.SessionID })
 		if err == nil {
@@ -727,7 +769,7 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (*agent.P
 	if err == nil && a.closed {
 		err = errAppClosing
 	}
-	r.conn, r.identity = c, [3]string{t.AgentID, t.Command, sessionID}
+	r.conn, r.identity, r.cwd = c, [3]string{t.AgentID, t.Command, sessionID}, t.Cwd
 	if err == nil {
 		r.session, r.acceptUpdates = sessionID, true
 		if current := a.threadLocked(t.ID); current != nil {
@@ -915,8 +957,10 @@ func (a *App) detachLocked(r *runtime) {
 	done := make(chan struct{})
 	r.closing = done
 	identity, deadline := r.identity, a.agentDeadline
+	var closing *folderClose
 	if session != "" {
 		a.closingSessions[identity] = done
+		closing = a.trackFolderCloseLocked(c, session, r.cwd, done)
 	}
 	a.wg.Add(1)
 	go func() {
@@ -931,6 +975,7 @@ func (a *App) detachLocked(r *runtime) {
 			r.sessionError = err.Error()
 			a.shutdownErrors = append(a.shutdownErrors, err)
 		}
+		a.finishFolderCloseLocked(closing, err)
 		if r.closing == done {
 			r.closing = nil
 		}

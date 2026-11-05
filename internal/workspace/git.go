@@ -91,9 +91,9 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
-// folderEnv is the environment without the variables that would point a command
+// FolderEnv is the environment without the variables that would point a command
 // at another repository than the folder it runs in.
-func folderEnv() []string {
+func FolderEnv() []string {
 	var env []string
 	for _, v := range os.Environ() {
 		name, _, _ := strings.Cut(v, "=")
@@ -112,7 +112,7 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
-	cmd.Env = append(folderEnv(), "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C") // noRepository reads its messages.
+	cmd.Env = append(FolderEnv(), "GIT_OPTIONAL_LOCKS=0", "LC_ALL=C") // noRepository reads its messages.
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {

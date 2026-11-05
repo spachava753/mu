@@ -17,8 +17,12 @@ The general folder in which each thread without a project gets its own new, rand
 _Avoid_: Project folder, launch directory
 
 **Project**:
-A named, existing folder that all of its threads work in. Removing a project leaves its threads and folder unchanged.
+A named, existing folder that its threads work in, unless they use a worktree of its repository. Removing a project leaves its threads and folder unchanged.
 _Avoid_: Workspace, repository
+
+**Worktree**:
+A checkout of a project's repository, in the sense of `git worktree`, that a thread can work in to have its own files and branch. Git owns it: one made outside Mu is the same as one made in Mu. Deleting one archives its threads and leaves the agent's sessions alone.
+_Avoid_: Environment, sandbox
 
 **Agent connection**:
 One running agent process that serves the sessions of every thread using the same agent configuration, and its discovery. A saved agent's connection stays open while idle.

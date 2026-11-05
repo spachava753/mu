@@ -27,6 +27,7 @@ func (v *View) openSettings() {
 	}
 	v.makeDefault = v.editAgent.ID != "" && v.editAgent.ID == s.DefaultAgentID
 	v.workDir = s.WorkingDirectory
+	v.worktreeTemplate = s.WorktreeTemplate
 }
 
 func (v *View) settings(c *ui.Context, s app.Snapshot) {
@@ -50,6 +51,7 @@ func (v *View) settings(c *ui.Context, s app.Snapshot) {
 					v.workDir, v.err = v.app.Snapshot().WorkingDirectory, ""
 				})
 			})
+			v.worktreeSettings(c, s)
 			v.projectSettings(c, s)
 			ui.Row(c).Gap(8).Margin(12, 0, 0, 0).Children(func() {
 				ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {

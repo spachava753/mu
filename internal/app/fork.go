@@ -72,7 +72,7 @@ func (a *App) Fork(id string) (string, error) {
 	if !live {
 		return fail(errors.New("the source session is no longer connected"))
 	}
-	result, err := awaitCreation(a, c, timeout, func(ctx context.Context) (*acp.ForkSessionResponse, error) {
+	result, err := awaitCreation(a, c, config.Cwd, timeout, func(ctx context.Context) (*acp.ForkSessionResponse, error) {
 		return p.Conn.SessionFork(ctx, &acp.ForkSessionRequest{SessionID: acp.SessionId(config.SessionID), Cwd: config.Cwd, AdditionalDirectories: config.AdditionalDirectories, McpServers: []acp.McpServer{}})
 	}, func(fork *acp.ForkSessionResponse) acp.SessionId {
 		if string(fork.SessionID) == config.SessionID {
@@ -87,7 +87,7 @@ func (a *App) Fork(id string) (string, error) {
 		return fail(errors.New("agent returned an invalid fork session ID"))
 	}
 	// The fork belongs to the agent; record it even if releasing it fails.
-	closeErr := p.CloseSession(string(result.SessionID), deadline)
+	closeErr := a.closeInFolder(c, string(result.SessionID), config.Cwd, deadline)
 
 	fork := config
 	fork.ID, fork.ParentID, fork.SessionID = state.ID(), id, string(result.SessionID)

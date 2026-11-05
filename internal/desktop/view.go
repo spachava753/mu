@@ -11,6 +11,7 @@ import (
 	"github.com/spachava753/acp-sdk/acp"
 	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/state"
+	"github.com/spachava753/mu/internal/worktree"
 )
 
 type View struct {
@@ -34,6 +35,10 @@ type View struct {
 	renameID, renameTitle, renameError   string
 	command, agentID, workDir, projectID string
 	projects                             projectEditor
+	work                                 workOn
+	worktrees                            worktreeEditor
+	worktreeTemplate                     string
+	notice                               string // something to know, not an error
 	builtins                             builtinEditor
 	customCommand                        bool
 	editAgent                            state.AgentConfig
@@ -92,7 +97,8 @@ func (v *View) loadSelected() {
 func (v *View) openNew() {
 	v.importOpen = false
 	v.picker, v.usageOpen = commandPicker{}, false
-	v.creating, v.settingsOpen, v.err = true, false, ""
+	v.creating, v.settingsOpen, v.err, v.notice = true, false, "", ""
+	v.work = workOn{}
 	v.app.RefreshBuiltins()
 	s := v.app.Snapshot()
 	v.agentID, v.projectID = s.DefaultAgentID, ""
@@ -277,7 +283,7 @@ func (v *View) Draw(c *ui.Context) {
 		v.app.FocusThread(v.selected)
 	}
 	matte(c)
-	if v.selection.active() && !v.deleting && !v.renaming && !v.projects.open && !v.projects.removing {
+	if v.selection.active() && !v.deleting && !v.renaming && !v.projects.open && !v.projects.removing && !v.worktrees.open && !v.worktrees.confirming {
 		c.OnShortcut(0, ui.KeyEscape, v.endSelection)
 	}
 	v.md.Theme = markdownTheme(c.Theme())
@@ -285,6 +291,9 @@ func (v *View) Draw(c *ui.Context) {
 	// can animate. An empty layer draws nothing and takes no input.
 	ui.Overlay(c, func() {})
 	s := v.app.Snapshot()
+	if v.collectWorktreeOperations(s) {
+		s = v.app.Snapshot()
+	}
 	v.keepAgentAvailable(s)
 	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
 		v.sidebar(c, s)
@@ -298,6 +307,9 @@ func (v *View) Draw(c *ui.Context) {
 			}
 			if v.err != "" {
 				v.dismissibleError(c, v.err)
+			}
+			if v.notice != "" {
+				v.noticeBox(c)
 			}
 			screen := v.selected
 			if v.creating {
@@ -351,6 +363,8 @@ func (v *View) Draw(c *ui.Context) {
 	v.renameDialog(c)
 	v.projectDialog(c)
 	v.removeProjectDialog(c, s)
+	v.worktreesDialog(c, s)
+	v.deleteWorktreeDialog(c, s)
 	v.removeAgentDialog(c)
 }
 
@@ -432,8 +446,8 @@ func (v *View) threadGroups(c *ui.Context, s app.Snapshot, groups []threadGroup,
 	for _, group := range groups {
 		switch {
 		case group.Project != nil:
-			v.projectHeading(c, *group.Project)
-			if len(group.Threads) == 0 {
+			v.projectHeading(c, s, *group.Project)
+			if !v.worktreeOperationRows(c, s, group.Project.ID) && len(group.Threads) == 0 {
 				ui.Text(c, "No threads yet").Padding(2, 8, 4, 8).FontSize(11.5).TextColor(faint(c.Theme()))
 			}
 		case group.Name != "":
@@ -458,6 +472,8 @@ func connectingText(thread app.ThreadView, existing string) string {
 
 func threadStatus(t *ui.Theme, thread app.ThreadView) (string, ui.Color) {
 	switch {
+	case thread.DeletingWorktree:
+		return "Deleting worktree…", t.TextMuted
 	case thread.Error != "":
 		return "Agent error", t.Danger
 	case len(thread.Permissions) > 0:
@@ -541,7 +557,12 @@ func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView, o
 				if thread.ProjectID != "" || filepath.Dir(thread.Cwd) == s.WorkingDirectory {
 					folder = ""
 				}
-				meta = joinNonEmpty(" · ", agent, folder, timeLabel(thread.Updated))
+				// A worktree is what tells a project's threads apart.
+				worktreeName := ""
+				if thread.Worktree.Path != "" {
+					worktreeName = thread.Worktree.Name()
+				}
+				meta = joinNonEmpty(" · ", worktreeName, agent, folder, timeLabel(thread.Updated))
 			}
 			if agentWorking(thread) {
 				shimmerText(c, meta, 11.5, color, color.Mix(t.Text, 0.6)).SingleLine()
@@ -587,6 +608,7 @@ func (v *View) threadRow(c *ui.Context, s app.Snapshot, thread app.ThreadView, o
 		if m.Item("Remove from Mu…").Disabled(busy).Chosen() {
 			v.confirmRemove(thread.ID)
 		}
+		v.deleteWorktreeItem(m, thread, busy)
 	})
 }
 
@@ -603,11 +625,12 @@ func itoa(n int) string { return count(uint64(max(n, 0))) }
 
 func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 	t := c.Theme()
-	screenHeader(c, "New thread", "Start an agent session in a new folder.", func() {
+	screenHeader(c, "New thread", "Start an agent session.", func() {
 		if v.selected != "" {
 			ui.Button(c, "Cancel").OnClick(func() { v.creating = false; v.err = "" })
 		}
 	})
+	var target worktree.Target
 	ui.Scroll(c).Grow(1).MinHeight(0).Padding(20, 24).Children(func() {
 		ui.Column(c).MaxWidth(560).Gap(18).Children(func() {
 			choices := v.agentChoices(s)
@@ -656,30 +679,55 @@ func (v *View) createForm(c *ui.Context, s app.Snapshot) {
 					}
 				}
 				selectChoice(c.Key("project"), "Thread project", v.projectID, choices, false, func(id string) { v.projectID = id })
-				ui.Text(c, folder).FontSize(12.5).TextColor(t.TextMuted)
+				// In a repository, what the thread works on says where it works.
+				if listing := s.Worktrees[v.projectID]; v.projectID == "" || listing == nil || !listing.Repo() {
+					ui.Text(c, folder).FontSize(12.5).TextColor(t.TextMuted)
+				}
 				ui.Row(c).Gap(4).Margin(-2, 0, 0, -7).Children(func() {
 					quietAction(c, "New project", "New project for this thread", false).OnClick(v.openNewProject)
 				})
 			})
-			ui.Row(c).Gap(8).Children(func() {
-				custom := v.customCommand || len(choices) == 0
-				missing := (custom && strings.TrimSpace(v.command) == "") || (!custom && v.agentID == "") || (!custom && isBuiltin && !builtin.Usable())
-				ui.PrimaryButton(c, "Create thread").Disabled(missing).OnClick(func() {
-					var id string
-					var err error
-					if custom {
-						id, err = v.app.Create(v.command, v.projectID)
-					} else {
-						id, err = v.app.CreateWithAgent(v.agentID, v.projectID)
-					}
-					if err != nil {
-						v.fail(err)
-						return
-					}
-					v.archived = false
-					v.selectThread(id)
-				})
-			})
+			target = v.workOnField(c, s)
+		})
+	})
+	// The form can be taller than the window, so the action stays in view.
+	ui.Column(c).Shrink(0).Padding(12, 24).Gap(10).BorderWidth(1, 0, 0, 0).BorderColor(t.Border).Children(func() {
+		v.workOnPreview(c, s, target)
+		choices := v.agentChoices(s)
+		builtin, isBuiltin := builtinByID(s, v.agentID)
+		custom := v.customCommand || len(choices) == 0
+		missing := (custom && strings.TrimSpace(v.command) == "") || (!custom && v.agentID == "") || (!custom && isBuiltin && !builtin.Usable())
+		text := "Create thread"
+		if v.work.opening != "" {
+			text = "Setting up the worktree…"
+		}
+		ui.PrimaryButton(c, text).AlignSelf(ui.Start).Disabled(missing || v.work.opening != "" || !workOnReady(s, v.projectID, target)).OnClick(func() {
+			agentID, command := v.agentID, ""
+			if custom {
+				agentID, command = "", v.command
+			}
+			if target != (worktree.Target{}) {
+				id, err := v.app.CreateInWorktree(agentID, command, v.projectID, target)
+				if err != nil {
+					v.fail(err)
+					return
+				}
+				v.work.opening, v.err = id, ""
+				return
+			}
+			var id string
+			var err error
+			if custom {
+				id, err = v.app.Create(command, v.projectID)
+			} else {
+				id, err = v.app.CreateWithAgent(agentID, v.projectID)
+			}
+			if err != nil {
+				v.fail(err)
+				return
+			}
+			v.archived = false
+			v.selectThread(id)
 		})
 	})
 }
@@ -727,6 +775,7 @@ func (v *View) threadHeader(c *ui.Context, thread app.ThreadView) {
 			if m.Item("Remove from Mu…").Disabled(busy).Chosen() {
 				v.confirmRemove(thread.ID)
 			}
+			v.deleteWorktreeItem(m, thread, busy)
 		})
 	})
 }

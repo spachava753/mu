@@ -202,6 +202,9 @@ func TestAgentSettingsUI(t *testing.T) {
 	click(t, tt, "Saved agent command")
 	tt.Type("my-agent --stdio")
 	tt.Frame()
+	// The form runs past the bottom of the window, as it does for a person.
+	tt.Scroll(660, 400, 0, 10000)
+	tt.Frame()
 	click(t, tt, "Save agent")
 	s := a.Snapshot()
 	if len(s.Agents) != 1 || s.DefaultAgentID != s.Agents[0].ID {
@@ -222,6 +225,8 @@ func TestAgentSettingsUI(t *testing.T) {
 		t.Fatal("wrong agent configured on thread", s)
 	}
 	click(t, tt, "Settings")
+	tt.Scroll(660, 400, 0, 10000)
+	tt.Frame()
 	click(t, tt, "Remove agent")
 	click(t, tt, "Keep agent")
 	if len(a.Snapshot().Agents) != 1 {

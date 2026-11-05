@@ -36,7 +36,7 @@ func InspectPullRequest(ctx context.Context, dir string) (PullRequest, error) {
 	cmd := exec.CommandContext(ctx, path, "pr", "view", "--json", "number,state,isDraft,title,url")
 	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
-	cmd.Env = append(folderEnv(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1", "NO_COLOR=1", "LC_ALL=C")
+	cmd.Env = append(FolderEnv(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1", "NO_COLOR=1", "LC_ALL=C")
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {

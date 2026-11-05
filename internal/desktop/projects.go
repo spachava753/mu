@@ -113,7 +113,7 @@ func (v *View) projectDialog(c *ui.Context) {
 		ui.Column(c).Width(420).MaxWidthPercent(100).Gap(14).Children(func() {
 			ui.Column(c).Gap(3).Children(func() {
 				ui.Text(c, heading).FontSize(14).FontWeight(500)
-				ui.Text(c, "A project is a name for an existing folder. All of its threads work in that folder.").FontSize(12).TextColor(t.TextMuted)
+				ui.Text(c, "A project is a name for an existing folder. Its threads work in that folder or, in a Git repository, in worktrees of it.").FontSize(12).TextColor(t.TextMuted)
 			})
 			field(c, "Folder", "", func() {
 				ui.Row(c).Gap(8).Children(func() {
@@ -190,11 +190,14 @@ func sentence(text string) string {
 
 // projectHeading is a project's section in the sidebar, with what can be done
 // with it next to its name.
-func (v *View) projectHeading(c *ui.Context, project state.Project) {
+func (v *View) projectHeading(c *ui.Context, s app.Snapshot, project state.Project) {
 	t := c.Theme()
 	actions := func(m *ui.Menu) {
 		if m.Item("New thread").Chosen() {
 			v.openNewIn(project.ID)
+		}
+		if listing := s.Worktrees[project.ID]; listing != nil && listing.Repo() && m.Item("Worktrees…").Chosen() {
+			v.openWorktrees(project.ID)
 		}
 		if m.Item("Edit project…").Chosen() {
 			v.openProject(project, false)
@@ -222,7 +225,7 @@ func (v *View) projectSettings(c *ui.Context, s app.Snapshot) {
 	ui.Row(c).Gap(8).Margin(12, 0, 0, 0).Children(func() {
 		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
 			ui.Text(c, "Projects").FontSize(13).FontWeight(500)
-			ui.Text(c, "Every thread in a project works in the project's folder.").FontSize(11.5).TextColor(t.TextMuted)
+			ui.Text(c, "A project's threads work in its folder or, in a Git repository, in worktrees of it.").FontSize(11.5).TextColor(t.TextMuted)
 		})
 		ui.Button(c, "New project").OnClick(func() { v.openProject(state.Project{}, false) })
 	})

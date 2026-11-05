@@ -21,6 +21,7 @@ Run commands from the repository root, not this skill directory. Read the releva
 | Composer options: every type, many options, a full composer beside permissions | `TestComposerOffersEveryOption`, `TestManyOptionsStayReachable`, `TestComposerKeepsRoomWithPermissions` in [composer_test.go](../../../internal/desktop/composer_test.go) | `composer-options`, `composer-many-options`, `composer-full-with-permissions` |
 | Sidebar drag: following, half-window limit, minimum, snap to rail | `TestSidebarDrag` in [motion_test.go](../../../internal/desktop/motion_test.go) | `sidebar-drag-*` |
 | Git line below the composer, linked worktrees, pull requests (from a stand-in `gh`) | `TestGitLine`, `TestPullRequestLine` in [composer_test.go](../../../internal/desktop/composer_test.go) | `git-line-*`, `pull-request-*` |
+| Worktrees: choosing what to work on, preview, listing, deleting and refusal | `TestWorktreesUI`, `TestWorktreeFolderSetting` in [worktrees_test.go](../../../internal/desktop/worktrees_test.go) | `worktree-*` |
 | Connecting a new thread: failure, sending while it starts | `TestFailedConnectionOffersRetry`, `TestEnterWhileConnectingSendsWhenReady` in [composer_test.go](../../../internal/desktop/composer_test.go) | `connection-failed`, `send-when-ready*` |
 | Slash completion and composer focus | `TestSlashCommandPicker` in [composer_test.go](../../../internal/desktop/composer_test.go) | `slash-commands-*` |
 | Discovery and selective import, scrolled list | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*`, `session-import-scrolled-*` |
@@ -36,7 +37,7 @@ Use a fresh ignored directory so old images cannot be mistaken for results of a 
 mkdir -p .qa &&
 out="$(mktemp -d "$PWD/.qa/visual-qa-XXXXXX")" &&
 MU_QA_RENDER_DIR="$out" go test ./internal/desktop \
-  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestComposerOffersEveryOption|TestManyOptionsStayReachable|TestComposerKeepsRoomWithPermissions|TestSidebarDrag|TestGitLine|TestPullRequestLine|TestFailedConnectionOffersRetry|TestEnterWhileConnectingSendsWhenReady|TestSlashCommandPicker|TestSelectiveSessionImportUI|TestQAConversation)$' \
+  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestComposerOffersEveryOption|TestManyOptionsStayReachable|TestComposerKeepsRoomWithPermissions|TestSidebarDrag|TestGitLine|TestPullRequestLine|TestWorktreesUI|TestWorktreeFolderSetting|TestFailedConnectionOffersRetry|TestEnterWhileConnectingSendsWhenReady|TestSlashCommandPicker|TestSelectiveSessionImportUI|TestQAConversation)$' \
   -count=1 -v -timeout 120s &&
 printf 'Screenshots: %s\n' "$out"
 ```
