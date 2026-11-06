@@ -633,7 +633,12 @@ func TestGitLine(t *testing.T) {
 			screenshot(t, tt, fmt.Sprintf("git-line-%d", size[0]))
 
 			// A linked worktree also shows its folder, in a project of its own.
-			linked := filepath.Join(t.TempDir(), "mu-resize")
+			// Git reports its real path, and the temporary directory on macOS is under a symlink.
+			parent, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			linked := filepath.Join(parent, "mu-resize")
 			git(dir, "worktree", "add", "-q", "-b", "side", linked)
 			project, err := a.SaveProject(state.Project{Name: "Linked", Dir: linked})
 			if err != nil {

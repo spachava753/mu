@@ -48,6 +48,19 @@ func worktreeProject(t *testing.T, a *App) (projectID, dir string) {
 	return projectID, dir
 }
 
+// worktreeFolders is where the default template puts a repository's worktrees.
+// Plans resolve symlinks, as the temporary directory on macOS is under one, and
+// the working directory may not exist yet.
+func worktreeFolders(t *testing.T, a *App, repo string) string {
+	t.Helper()
+	work := a.Snapshot().WorkingDirectory
+	parent, err := filepath.EvalSymlinks(filepath.Dir(work))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(parent, filepath.Base(work), "worktrees", filepath.Base(repo))
+}
+
 func awaitWorktrees(t *testing.T, a *App, projectID string, condition func(*ProjectWorktrees) bool) *ProjectWorktrees {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -96,7 +109,7 @@ func TestThreadsInWorktreesAreIsolated(t *testing.T) {
 	project, dir := worktreeProject(t, a)
 	first := newBranchThread(t, a, command, project, "first")
 	second := newBranchThread(t, a, command, project, "second")
-	want := filepath.Join(a.Snapshot().WorkingDirectory, "worktrees", filepath.Base(dir), "first")
+	want := filepath.Join(worktreeFolders(t, a, dir), "first")
 	if first.Cwd != want || first.ProjectID != project || first.Cwd == second.Cwd {
 		t.Fatalf("%+v", first.Thread)
 	}
@@ -431,7 +444,7 @@ func TestWorktreeTemplateAndPreview(t *testing.T) {
 		t.Fatalf("%+v", a.Snapshot().WorktreePreview)
 		return WorktreePreview{}
 	}
-	want := filepath.Join(a.Snapshot().WorkingDirectory, "worktrees", filepath.Base(repo), "feature-y")
+	want := filepath.Join(worktreeFolders(t, a, repo), "feature-y")
 	preview(func(p WorktreePreview) bool { return p.Plan.Path == want })
 	// A change of template updates the preview.
 	if err := a.SetWorktreeTemplate("{repoPath}/.worktrees/{branch}"); err != nil {

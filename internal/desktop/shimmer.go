@@ -49,7 +49,10 @@ func shimmerText(c *ui.Context, text string, size float32, base, highlight ui.Co
 		for i, char := range runes {
 			spans[i] = ui.Span{Text: string(char), Color: base.Mix(highlight, shimmerLevel(i, len(runes), phase))}
 		}
-		p.Clip(r, 0, func() { p.TextLayout(ui.ShapeRichText(spans, font, 0), r.X, r.Y, base) })
+		// Clipped only at the sides, as the element may be narrower than the text:
+		// some fonts' descenders reach below the text's box, as plain text shows them.
+		box := ui.Rect{X: r.X, Y: r.Y - size, W: r.W, H: r.H + 2*size}
+		p.Clip(box, 0, func() { p.TextLayout(ui.ShapeRichText(spans, font, 0), r.X, r.Y, base) })
 		p.After(shimmerFrame)
 	})
 }
