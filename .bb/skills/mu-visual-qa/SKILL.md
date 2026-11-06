@@ -24,6 +24,7 @@ Run commands from the repository root, not this skill directory. Read the releva
 | Worktrees: choosing what to work on, preview, listing, deleting and refusal | `TestWorktreesUI`, `TestWorktreeFolderSetting` in [worktrees_test.go](../../../internal/desktop/worktrees_test.go) | `worktree-*` |
 | Connecting a new thread: failure, sending while it starts | `TestFailedConnectionOffersRetry`, `TestEnterWhileConnectingSendsWhenReady` in [composer_test.go](../../../internal/desktop/composer_test.go) | `connection-failed`, `send-when-ready*` |
 | Slash completion and composer focus | `TestSlashCommandPicker` in [composer_test.go](../../../internal/desktop/composer_test.go) | `slash-commands-*` |
+| Add to prompt popup on a reply's selection, and the quote in the draft | `TestAddSelectionToPrompt` in [composer_test.go](../../../internal/desktop/composer_test.go) | `add-to-prompt-*` |
 | Discovery and selective import, scrolled list | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*`, `session-import-scrolled-*` |
 | Motion, reversal, reduced motion | Tests in [motion_test.go](../../../internal/desktop/motion_test.go) and [disclosure_test.go](../../../internal/desktop/disclosure_test.go) | `TestRecordMotion` writes `mu-motion.gif`; the other tests assert intermediate states |
 
@@ -37,7 +38,7 @@ Use a fresh ignored directory so old images cannot be mistaken for results of a 
 mkdir -p .qa &&
 out="$(mktemp -d "$PWD/.qa/visual-qa-XXXXXX")" &&
 MU_QA_RENDER_DIR="$out" go test ./internal/desktop \
-  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestComposerOffersEveryOption|TestManyOptionsStayReachable|TestComposerKeepsRoomWithPermissions|TestSidebarDrag|TestGitLine|TestPullRequestLine|TestWorktreesUI|TestWorktreeFolderSetting|TestFailedConnectionOffersRetry|TestEnterWhileConnectingSendsWhenReady|TestSlashCommandPicker|TestSelectiveSessionImportUI|TestQAConversation)$' \
+  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestComposerOffersEveryOption|TestManyOptionsStayReachable|TestComposerKeepsRoomWithPermissions|TestSidebarDrag|TestGitLine|TestPullRequestLine|TestWorktreesUI|TestWorktreeFolderSetting|TestFailedConnectionOffersRetry|TestEnterWhileConnectingSendsWhenReady|TestSlashCommandPicker|TestAddSelectionToPrompt|TestSelectiveSessionImportUI|TestQAConversation)$' \
   -count=1 -v -timeout 120s &&
 printf 'Screenshots: %s\n' "$out"
 ```

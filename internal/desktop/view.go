@@ -29,6 +29,8 @@ type View struct {
 	springing                            bool
 	sidebarShown                         float32 // as of the last frame
 	picker                               commandPicker
+	quote                                quotePopup
+	messages                             ui.Rect // the visible transcript, as of the last frame
 	deleteIDs                            []string
 	selection                            threadSelection
 	renaming, renameFresh                bool
@@ -810,7 +812,7 @@ func (v *View) thread(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 		}
 		list.Key = func(i int) any { return thread.Entries[i].ID }
 		ui.Column(c).Grow(1).MinHeight(0).Children(func() {
-			ui.List(c.Key("messages"), list, len(thread.Entries), func(i int) {
+			messages := ui.List(c.Key("messages"), list, len(thread.Entries), func(i int) {
 				top := float32(18)
 				if i == 0 {
 					top = 0
@@ -818,7 +820,7 @@ func (v *View) thread(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 					top = 2
 				}
 				ui.Row(c).Justify(ui.Center).Padding(top, 24, 0, 24).Children(func() {
-					ui.Column(c).Grow(1).MaxWidth(readingWidth).MinWidth(0).Children(func() { v.entry(c, thread.ID, thread.Entries[i]) })
+					ui.Column(c).Grow(1).MaxWidth(readingWidth).MinWidth(0).Children(func() { v.entry(c, thread, thread.Entries[i]) })
 				})
 			}).Grow(1).MinHeight(0).Padding(20, 0, 20, 0).Children(func() {
 				if len(thread.Entries) == 0 {
@@ -843,6 +845,7 @@ func (v *View) thread(c *ui.Context, s app.Snapshot, thread app.ThreadView) {
 					})
 				}
 			})
+			v.messages = messages.Bounds()
 			if !list.AtEnd() && len(thread.Entries) > 0 {
 				jump := ui.ButtonBase(c).Transition(colorMotion).Label("Jump to latest").Attach(ui.AnchorBottom, ui.AnchorBottom).Bottom(10).Height(26).Padding(0, 10).Radius(6).Border(1, hairline(t)).Gap(6)
 				if jump.Hovered() {
@@ -1051,8 +1054,9 @@ func modeChoices(modes *acp.SessionModeState) []choice {
 	return choices
 }
 
-func (v *View) entry(c *ui.Context, threadID string, e state.Entry) {
+func (v *View) entry(c *ui.Context, thread app.ThreadView, e state.Entry) {
 	t := c.Theme()
+	threadID := thread.ID
 	details := func() {
 		if e.Details != "" {
 			smallDisclosure(c, "Content details", v.disclosure("content"+threadID+e.ID), func() {
@@ -1063,8 +1067,9 @@ func (v *View) entry(c *ui.Context, threadID string, e state.Entry) {
 	switch e.Role {
 	case "assistant":
 		ui.Column(c).Gap(6).Children(func() {
-			markdown.View(c, e.Text, &v.md)
+			message := markdown.View(c, e.Text, &v.md)
 			details()
+			v.quoteAction(c, thread, e.ID, message)
 		})
 	case "user":
 		ui.Row(c).Justify(ui.End).Children(func() {

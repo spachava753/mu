@@ -761,3 +761,252 @@ func threadTitle(t *testing.T, a *app.App, id string) string {
 	t.Helper()
 	return threadView(a.Snapshot(), id).Title
 }
+
+// quoteFixture is a thread whose last reply is given, echoed by the test agent.
+func quoteFixture(t *testing.T, width, height int, prompt string) (*app.App, *ui.Tester) {
+	t.Helper()
+	a, tt := composerFixture(t, width, height)
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
+	sendPrompt(t, a, tt, prompt)
+	return a, tt
+}
+
+func sendPrompt(t *testing.T, a *app.App, tt *ui.Tester, prompt string) {
+	t.Helper()
+	n := len(a.Snapshot().Threads[0].Entries)
+	click(t, tt, "Message")
+	for i, line := range strings.Split(prompt, "\n") {
+		if i > 0 {
+			tt.Key(ui.Shift, ui.KeyEnter)
+		}
+		tt.Type(line)
+	}
+	tt.Frame()
+	tt.Key(0, ui.KeyEnter)
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Entries) > n })
+}
+
+// dragAcross selects from the start of a paragraph to a point along it.
+func dragAcross(t *testing.T, tt *ui.Tester, text string, fraction float32) (x, y float32) {
+	t.Helper()
+	r, ok := tt.Find(text)
+	if !ok {
+		t.Fatalf("no %q in %q", text, tt.Texts())
+	}
+	x, y = r.X+r.W*fraction, r.Y+r.H/2
+	tt.Press(r.X+1, y)
+	tt.Frame()
+	tt.Move(x, y)
+	tt.Frame()
+	tt.Release(x, y)
+	tt.Frame()
+	return x, y
+}
+
+func lastUserText(s app.Snapshot) string {
+	entries := s.Threads[0].Entries
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Role == "user" {
+			return entries[i].Text
+		}
+	}
+	return ""
+}
+
+func TestAddSelectionToPrompt(t *testing.T) {
+	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			a, tt := quoteFixture(t, size[0], size[1], "the quick brown fox jumps over the lazy dog")
+			click(t, tt, "Message")
+			tt.Type("my question")
+			tt.Frame()
+
+			x, y := dragAcross(t, tt, "Echo: the quick brown fox jumps over the lazy dog", 0.5)
+			if _, ok := tt.Find("Add to prompt"); ok {
+				t.Fatal("offered before the selection settled")
+			}
+			tt.Advance(300 * time.Millisecond)
+			tt.Advance(320 * time.Millisecond)
+			popup, ok := tt.Find("Add to prompt")
+			if !ok {
+				t.Fatal("selection was not offered", tt.Texts())
+			}
+			if popup.Y+popup.H > y || y-(popup.Y+popup.H) > 12 || popup.X > x || popup.X+popup.W < x {
+				t.Fatalf("popup %+v is not just above the pointer at %v,%v", popup, x, y)
+			}
+			screenshot(t, tt, fmt.Sprintf("add-to-prompt-%d", size[0]))
+			tt.SetDark(false)
+			tt.Frame()
+			screenshot(t, tt, fmt.Sprintf("add-to-prompt-light-%d", size[0]))
+			tt.SetDark(true)
+			tt.Frame()
+
+			click(t, tt, "Add to prompt")
+			if _, ok := tt.Find("Add to prompt"); ok {
+				t.Fatal("popup stayed after adding")
+			}
+			if len(a.Snapshot().Threads[0].Entries) != 2 {
+				t.Fatal("adding sent the draft")
+			}
+			screenshot(t, tt, fmt.Sprintf("add-to-prompt-added-%d", size[0]))
+			// The draft has the focus again: what's typed follows the quote.
+			tt.Type("why?")
+			tt.Frame()
+			tt.Key(0, ui.KeyEnter)
+			waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Entries) == 4 })
+			got := lastUserText(a.Snapshot())
+			if !strings.HasPrefix(got, "my question\n> Echo: the quick") || !strings.HasSuffix(got, "\n\nwhy?") {
+				t.Fatalf("sent %q", got)
+			}
+		})
+	}
+}
+
+func TestAddSelectionAcrossParagraphs(t *testing.T) {
+	a, tt := quoteFixture(t, 1100, 780, "first paragraph\n\nsecond paragraph")
+	first, _ := tt.Find("Echo: first paragraph")
+	second, ok := tt.Find("second paragraph")
+	if !ok {
+		t.Fatal(tt.Texts())
+	}
+	tt.Press(first.X+1, first.Y+first.H/2)
+	tt.Frame()
+	end := second.X + second.W - 2
+	tt.Move(end, second.Y+second.H/2)
+	tt.Frame()
+	tt.Release(end, second.Y+second.H/2)
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	click(t, tt, "Add to prompt")
+	tt.Key(0, ui.KeyEnter)
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Entries) == 4 })
+	if got, want := lastUserText(a.Snapshot()), "> Echo: first paragraph\n>\n> second paragraph\n\n"; got != want {
+		t.Fatalf("sent %q, want %q", got, want)
+	}
+}
+
+func TestAddSelectionPopupCloses(t *testing.T) {
+	a, tt := quoteFixture(t, 1100, 780, "the quick brown fox")
+	open := func() {
+		t.Helper()
+		dragAcross(t, tt, "Echo: the quick brown fox", 0.5)
+		tt.Advance(320 * time.Millisecond)
+		if _, ok := tt.Find("Add to prompt"); !ok {
+			t.Fatal("selection was not offered")
+		}
+	}
+	gone := func(what string) {
+		t.Helper()
+		tt.Frame()
+		tt.Advance(320 * time.Millisecond)
+		if _, ok := tt.Find("Add to prompt"); ok {
+			t.Fatal("still offered after " + what)
+		}
+	}
+
+	open()
+	tt.Key(0, ui.KeyEscape)
+	gone("Escape")
+
+	open()
+	click(t, tt, "Message")
+	gone("focusing the draft")
+
+	// A click collapses the selection.
+	open()
+	r, _ := tt.Find("Echo: the quick brown fox")
+	tt.ClickAt(r.X+r.W/2, r.Y+r.H/2)
+	gone("collapsing the selection")
+
+	// Selecting the same text again offers it again, even after Escape.
+	open()
+	tt.Key(0, ui.KeyEscape)
+	gone("Escape")
+	open()
+
+	// Your own messages aren't offered.
+	tt.Key(0, ui.KeyEscape)
+	dragAcross(t, tt, "the quick brown fox", 0.5)
+	gone("selecting a user message")
+	if got := len(a.Snapshot().Threads[0].Entries); got != 2 {
+		t.Fatalf("%d entries", got)
+	}
+}
+
+func TestAddSelectionFollowsScroll(t *testing.T) {
+	a, tt := quoteFixture(t, 800, 600, "the quick brown fox")
+	for range 6 {
+		sendPrompt(t, a, tt, "padding\n\npadding\n\npadding\n\npadding\n\npadding")
+	}
+	// Back to the first reply, in the middle of the view, to scroll both ways.
+	list, _ := tt.Find("Message")
+	tt.Scroll(list.X+40, 200, 0, -100000)
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	dragAcross(t, tt, "Echo: the quick brown fox", 0.5)
+	tt.Advance(320 * time.Millisecond)
+	before, ok := tt.Find("Add to prompt")
+	if !ok {
+		t.Fatal("selection was not offered")
+	}
+	tt.Scroll(list.X+40, 200, 0, 30)
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	after, ok := tt.Find("Add to prompt")
+	if !ok {
+		t.Fatal("popup lost on a small scroll")
+	}
+	if after.Y >= before.Y {
+		t.Fatalf("popup did not scroll with its text: %+v then %+v", before, after)
+	}
+	// Scrolled away, it doesn't float over the header and composer.
+	tt.Scroll(list.X+40, 200, 0, 300)
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	if r, ok := tt.Find("Add to prompt"); ok {
+		t.Fatalf("popup still shown at %+v", r)
+	}
+}
+
+func TestAddSelectionWhileAgentWorks(t *testing.T) {
+	a, tt := quoteFixture(t, 800, 600, "the quick brown fox")
+	click(t, tt, "Message")
+	tt.Type("wait")
+	tt.Frame()
+	tt.Key(0, ui.KeyEnter)
+	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Running })
+	dragAcross(t, tt, "Echo: the quick brown fox", 0.5)
+	tt.Advance(320 * time.Millisecond)
+	click(t, tt, "Add to prompt")
+	click(t, tt, "Stop")
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running })
+	click(t, tt, "Message")
+	tt.Type("why?")
+	tt.Frame()
+	tt.Key(0, ui.KeyEnter)
+	waitView(t, a, tt, func(s app.Snapshot) bool { return strings.Contains(lastUserText(s), "why?") })
+	if got := lastUserText(a.Snapshot()); !strings.HasPrefix(got, "> Echo: the quick") {
+		t.Fatalf("sent %q", got)
+	}
+}
+
+func TestAddSelectionByKeyboard(t *testing.T) {
+	a, tt := quoteFixture(t, 1100, 780, "the quick brown fox")
+	r, _ := tt.Find("Echo: the quick brown fox")
+	tt.ClickAt(r.X+1, r.Y+r.H/2)
+	tt.Frame()
+	for range 5 {
+		tt.Key(ui.Shift, ui.KeyRight)
+	}
+	tt.Frame()
+	tt.Advance(320 * time.Millisecond)
+	if _, ok := tt.Find("Add to prompt"); !ok {
+		t.Fatal("keyboard selection was not offered")
+	}
+	click(t, tt, "Add to prompt")
+	tt.Key(0, ui.KeyEnter)
+	waitView(t, a, tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Entries) == 4 })
+	if got, want := lastUserText(a.Snapshot()), "> Echo:\n\n"; got != want {
+		t.Fatalf("sent %q, want %q", got, want)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/state"
 )
 
@@ -12,7 +13,7 @@ func TestTranscriptDisclosureAnimates(t *testing.T) {
 	v := &View{expanded: map[string]*bool{}}
 	tt := ui.NewTester(func(c *ui.Context) {
 		ui.Column(c).Children(func() {
-			v.entry(c, "thread", state.Entry{ID: "thought", Role: "thought", Text: "First line\nSecond line\nThird line\nFourth line"})
+			v.entry(c, app.ThreadView{ID: "thread"}, state.Entry{ID: "thought", Role: "thought", Text: "First line\nSecond line\nThird line\nFourth line"})
 			ui.Text(c, "After thinking")
 		})
 	}, 600, 400)
