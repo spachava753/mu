@@ -11,6 +11,7 @@ import (
 	"github.com/spachava753/mu/internal/app"
 	"github.com/spachava753/mu/internal/builtins"
 	"github.com/spachava753/mu/internal/desktop"
+	"github.com/spachava753/mu/internal/shellpath"
 	"github.com/spachava753/mu/internal/state"
 )
 
@@ -25,6 +26,9 @@ func run() (err error) {
 	dataDir := flag.String("data-dir", "", "session reference directory (default: $XDG_DATA_HOME/mu or ~/.local/share/mu)")
 	command := flag.String("agent", "", "prefill the new-thread ACP command")
 	flag.Parse()
+	if err := shellpath.Adopt(); err != nil {
+		fmt.Fprintln(os.Stderr, "mu:", err)
+	}
 	if *dataDir == "" {
 		*dataDir, err = state.DefaultDir()
 		if err != nil {

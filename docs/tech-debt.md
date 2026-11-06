@@ -31,7 +31,7 @@ Separately, the read loop completes responses immediately while notifications wa
 **When the SDK supports it:**
 
 1. Check that `App.permission` answers `cancelled` when the agent withdraws a request (the handler's context ends), and add a test.
-2. Remove the limitation from the "Permission requests" section of `README.md`, and restore withdrawal in its list of reasons a request is answered as cancelled.
+2. Remove the limitation from the "Permission requests" section of `docs/behavior.md`, and restore withdrawal in its list of reasons a request is answered as cancelled.
 3. Add a test that the agent receives `$/cancel_request` when Mu abandons a request.
 
 ### Abandoned requests stay registered

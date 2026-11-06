@@ -1,5 +1,6 @@
 /mu
 /bin/
+/dist/
 /.tools/
 /.qa/
 /.plan/

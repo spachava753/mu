@@ -1,0 +1,16 @@
+{
+  "name": "Mu",
+  "identifier": "io.github.spachava753.mu",
+  "version": "0.1.0",
+  "linux": {
+    "webview": false,
+    "maintainer": "Shashank Pachava",
+    "comment": "Native desktop client for ACP coding agents",
+    "categories": ["Development"],
+    "command": "mu"
+  },
+  "updates": {
+    "publicKey": "LUabpqEuU0A5c8JSavQ/m9lvCqYUfkdPOhQ+XiNU4GY=",
+    "github": "spachava753/mu"
+  }
+}

@@ -13,6 +13,8 @@ When making a breaking change to the data model or persistence layer, wipe the e
 ## Structure
 
 - `main.go`: CLI flags and window startup/shutdown.
+- `mygo.json`, `resources/`, `.github/workflows/release.yml`: packaging and releases through `go tool mygo build`. Tags must match the version in `mygo.json`. Keep the update signing key out of the repository.
+- `internal/shellpath`: adopts the login shell's `PATH` when macOS starts Mu from the Dock or Finder, before anything looks up a command.
 - `internal/desktop`: native view; use `ui.NewTester` for interaction tests.
 - `internal/app`: synchronized thread state, ACP lifecycle, shared agent connections (`connections.go`), projects and thread folders, permission handling, and persistence orchestration.
 - `internal/agent`: ACP connection and the agent behind it, a child process or a registered in-process server.
@@ -25,7 +27,7 @@ When making a breaking change to the data model or persistence layer, wipe the e
 - `internal/state`: session references and settings with an exclusive process lock and atomic saves. Never persist conversations or SDK session state.
 - `internal/agent/testdata/agent`: deterministic stdio agent used by tests.
 
-Read `README.md` and `GLOSSARY.md` for deliberate semantics. Require ACP v1 list/load/close/fork at initialization (not resume, which Mu never calls); reject missing capabilities without fallbacks. Fork uses the SDK's native `session/fork`, which ACP still marks unstable. Remove is local only; agent processes are not sandboxed.
+Read `docs/behavior.md` and `GLOSSARY.md` for deliberate semantics, and record new behavior in `docs/behavior.md`. `README.md` is only for someone deciding whether to use Mu and how to install it: keep it short, and keep implementation details out of it. Require ACP v1 list/load/close/fork at initialization (not resume, which Mu never calls); reject missing capabilities without fallbacks. Fork uses the SDK's native `session/fork`, which ACP still marks unstable. Remove is local only; agent processes are not sandboxed.
 
 Use MyGo's animation clock and transitions, not sleeps or per-frame timers. Respect reduced motion; never delay streamed text for presentation. Keep the empty overlay layer in `View.Draw`: it supplies a stable parent for overlay enter/exit transitions. Headless interaction tests advance their clock to settle motion; animation tests must also inspect intermediate frames.
 
