@@ -13,7 +13,7 @@ When making a breaking change to the data model or persistence layer, wipe the e
 ## Structure
 
 - `main.go`: CLI flags and window startup/shutdown.
-- `mygo.json`, `resources/`, `.github/workflows/release.yml`: packaging and releases through `go tool mygo build`. Tags must match the version in `mygo.json`. Keep the update signing key out of the repository.
+- `mygo.json`, `resources/`, `.github/workflows/release.yml`: packaging and releases through `go tool mygo build`. To release, bump `version` in `mygo.json`, commit, and push a matching tag (`v` plus the version). That tests on Linux and macOS and uploads to a draft release, which still has to be published. Never move a pushed tag, because Go's module proxy treats versions as permanent: bump to a new version instead. Keep the update signing key out of the repository.
 - `internal/shellpath`: adopts the login shell's `PATH` when macOS starts Mu from the Dock or Finder, before anything looks up a command.
 - `internal/desktop`: native view; use `ui.NewTester` for interaction tests.
 - `internal/app`: synchronized thread state, ACP lifecycle, shared agent connections (`connections.go`), projects and thread folders, permission handling, and persistence orchestration.
@@ -46,5 +46,7 @@ Known tech debt, including that SDK gap and what to change once it is fixed, is 
 For Mu UI changes, visual regressions, or screenshot/animation QA requests, read and follow [mu-visual-qa](.bb/skills/mu-visual-qa/SKILL.md). Capture with the offline harness and inspect the images; passing tests alone is not visual QA.
 
 Run `go test -race ./...`, `go vet ./...`, and `go build -o bin/mu .` after meaningful changes. Tests use an offline fixture with its own session store, separate from Mu’s data directory. The old Pi lifecycle QA was removed: pinned pi-acp@0.0.34 lacks required close/fork capabilities. Obtain task-specific authorization before adding or running any real-provider QA, including `TestLivePi` in `internal/desktop`, which drives the Pi installed on the machine against a real model. No provider credentials belong in source, test output, or fixture files.
+
+An installed Mu may be running, and it shares the default data directory and its exclusive lock, so plain `go run .` can refuse to start. Run development copies with `go run . --data-dir "$PWD/.qa/dev"`, and don't stop the installed Mu to make room.
 
 `.tools/` contains an optional locally installed Pi ACP adapter and is ignored. `.qa/` is for ignored manual-test state/screenshots. Do not load their transient test settings into the user's normal agent configuration. Do not commit binaries or local histories.
