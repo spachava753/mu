@@ -28,7 +28,7 @@ func (v *View) quoteAction(c *ui.Context, thread app.ThreadView, entryID string,
 	q := &v.quote
 	owner := thread.ID + "\x00" + entryID
 	text := quoteBlock(message.SelectedTexts())
-	_, waiting := v.queued[thread.ID] // A draft waiting to send is read-only.
+	_, waiting := v.connecting[thread.ID] // A draft waiting to send is read-only.
 	// The selection isn't shown once the focus leaves its message, and isn't
 	// cleared by that: it would otherwise still be here, invisibly.
 	if text == "" || thread.Archived || waiting || !message.FocusWithin() {

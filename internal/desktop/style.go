@@ -109,6 +109,7 @@ var (
 	moreIcon        = svg(`<circle cx="5.5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="18.5" cy="12" r="1.1"/>`)
 	closeIcon       = svg(`<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>`)
 	sendIcon        = svg(`<path d="M12 19V5.5M6 11.5l6-6 6 6"/>`)
+	queueIcon       = svg(`<path d="M4 6.5h13M4 12h13M4 17.5h7M18 14.5v6M15 17.5h6"/>`)
 	stopIcon        = svg(`<rect x="7" y="7" width="10" height="10" rx="1.5"/>`)
 	checkIcon       = svg(`<path d="m5.5 12.5 4 4 9-9.5"/>`)
 	chevronIcon     = svg(`<path d="m8 10 4 4 4-4"/>`)

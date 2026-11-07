@@ -199,11 +199,13 @@ func (a *App) changeSession(id string, prepare sessionChange) error {
 		r.configuring, r.configCancel = false, nil
 		if err != nil {
 			r.sessionError = p.Error(err).Error()
+			r.queueHeld = true // What's queued may have been written for the new setting.
 		} else if current := a.threadLocked(id); current != nil {
 			apply(&current.Session)
 			r.sessionVersion++
 			_ = a.saveLocked()
 		}
+		a.nextPromptLocked(id, r) // A turn may have ended meanwhile.
 		a.notifyLocked()
 	}()
 	return nil

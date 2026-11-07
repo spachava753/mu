@@ -73,6 +73,9 @@ type ThreadView struct {
 	// unless that is the project's own folder. As last listed.
 	Worktree         worktree.Worktree
 	DeletingWorktree bool
+	Queue            []QueuedPrompt // next first
+	QueueHeld        bool           // something went wrong or was stopped, so the queue waits for the user
+	Stopping         bool           // the running turn has been asked to end
 }
 
 type Snapshot struct {
@@ -143,6 +146,8 @@ type runtime struct {
 	echo                         promptEcho
 	deletingWorktree             bool   // configuring holds the session back meanwhile
 	cwd                          string // of the session on conn
+	queue                        []QueuedPrompt
+	queueHeld                    bool // only a prompt the user sends now starts another turn
 }
 
 // live reports whether the thread has an open session on a running process.
@@ -303,6 +308,7 @@ func (a *App) Snapshot() Snapshot {
 		v := ThreadView{Thread: t, Git: git, PullRequest: a.pullRequests[[2]string{t.Cwd, git.Branch}], Worktree: a.worktrees[t.ProjectID].lookup(t.Cwd)}
 		if r := a.runtimes[t.ID]; r != nil {
 			v.DeletingWorktree = r.deletingWorktree
+			v.Queue, v.QueueHeld, v.Stopping = slices.Clone(r.queue), r.queueHeld, r.job != nil && r.job.stopping
 			v.Conversation = r.Conversation
 			v.Entries = slices.Clone(r.Entries)
 			if r.cloneVersion != r.sessionVersion {
@@ -469,8 +475,14 @@ func (a *App) Send(id, text string) error {
 
 // SendParts sends a message of text and files, in the order given.
 func (a *App) SendParts(id string, parts []state.Part) error {
-	text := state.PartsText(parts)
-	if strings.TrimSpace(text) == "" {
+	return a.submit(id, parts, nil)
+}
+
+// submit starts a turn with a prompt, or if one is running, calls during if there
+// is one. Whether a turn is running is decided here because the turn before can end
+// at any moment, and a queued prompt can start another.
+func (a *App) submit(id string, parts []state.Part, during func(*runtime)) error {
+	if strings.TrimSpace(state.PartsText(parts)) == "" {
 		return errors.New("enter a message")
 	}
 	a.mu.Lock()
@@ -485,13 +497,24 @@ func (a *App) SendParts(id string, parts []state.Part) error {
 	if t.Archived {
 		return errors.New("restore this thread before sending")
 	}
-	if t.Running {
-		return errors.New("a turn is already running")
-	}
 	r := a.runtimeLocked(id)
+	if t.Running {
+		if during == nil {
+			return errors.New("a turn is already running")
+		}
+		during(r)
+		a.notifyLocked()
+		return nil
+	}
 	if r.configuring || r.closing != nil {
 		return errors.New("wait for the session request to finish")
 	}
+	return a.startTurnLocked(t, r, parts)
+}
+
+// startTurnLocked starts a turn in a thread with none running. A closing session is
+// no obstacle, as connecting waits for it.
+func (a *App) startTurnLocked(t *thread, r *runtime, parts []state.Part) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	j := &job{ctx: ctx, cancel: cancel, done: make(chan struct{}), promptDone: make(chan struct{})}
 	before := *t.Thread
@@ -513,6 +536,10 @@ func (a *App) SendParts(id string, parts []state.Part) error {
 	}
 	r.job, r.status, r.err, r.sessionError = j, "Connecting…", "", ""
 	r.echo, r.turnTools = promptEcho{}, map[string]bool{}
+	// A new turn is what steering prompts were waiting for. Any still waiting are
+	// queued for this one like the rest, and could interrupt it in turn.
+	r.queueHeld = false
+	r.stopSteering()
 	a.notifyLocked()
 	config := *t.Thread
 	a.wg.Add(1)
@@ -578,6 +605,7 @@ func (a *App) run(t state.Thread, parts []state.Part, r *runtime, j *job) {
 		current.Session.StopReason = result.StopReason
 		storeMeta(&current.Session, "prompt", result.Meta)
 		r.sessionVersion++
+		finished := false
 		if j.stopping || j.ctx.Err() != nil || result.StopReason == acp.StopReasonCancelled {
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: "Stopped. The response may be incomplete."})
 		} else if err != nil {
@@ -587,7 +615,10 @@ func (a *App) run(t state.Thread, parts []state.Part, r *runtime, j *job) {
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: text})
 		} else if result.StopReason == acp.StopReasonEndTurn && len(current.Entries) == before {
 			current.Entries = append(current.Entries, state.Entry{ID: state.ID(), Role: "system", Text: "The agent ended the turn without a response. Check its login, model configuration, and provider status before trying again."})
+		} else {
+			finished = true
 		}
+		r.queueHeld = r.queueHeld || !finished
 		// An error response does not end the session. Detach only when the
 		// process is gone or Mu abandoned the request, as after Stop's deadline.
 		if err != nil && p != nil && (!p.Alive() || j.ctx.Err() != nil) {
@@ -602,6 +633,7 @@ func (a *App) run(t state.Thread, parts []state.Part, r *runtime, j *job) {
 	}
 	r.acceptUpdates = r.live()
 	r.job = nil
+	a.nextPromptLocked(t.ID, r)
 	a.notifyLocked()
 }
 
@@ -868,11 +900,23 @@ func (a *App) connect(ctx context.Context, t state.Thread, r *runtime) (_ *agent
 	return p, nil
 }
 
+// Stop ends the thread's turn. What's queued stays, but nothing further goes out by
+// itself: the user asked for the agent to stop working.
 func (a *App) Stop(id string) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	r := a.runtimes[id]
-	if r == nil || r.job == nil || r.job.stopping {
-		a.mu.Unlock()
+	if r == nil || r.job == nil {
+		return
+	}
+	r.holdQueue()
+	a.interruptLocked(id, r)
+	a.notifyLocked()
+}
+
+// interruptLocked asks the agent to end the running turn, once.
+func (a *App) interruptLocked(id string, r *runtime) {
+	if r.job == nil || r.job.stopping {
 		return
 	}
 	j, session := r.job, r.session
@@ -890,15 +934,12 @@ func (a *App) Stop(id string) {
 		}
 	}
 	r.status = "Stopping…"
-	a.notifyLocked()
 	if !r.live() {
 		j.cancel()
-		a.mu.Unlock()
 		return
 	}
 	j.stopDone = make(chan struct{})
 	p, deadline := r.conn.process, a.agentDeadline
-	a.mu.Unlock()
 	go func() {
 		defer close(j.stopDone)
 		// Only dispatching the cancellation needs a hard deadline: the write

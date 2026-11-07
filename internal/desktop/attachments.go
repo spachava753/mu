@@ -96,7 +96,7 @@ func draftParts(text string, files []*attachment) []state.Part {
 // draft can't be sent.
 func (v *View) addFiles(services ui.Services, thread string, paths []string) {
 	s, read := &v.attach, v.attach.read
-	delete(v.queued, thread) // A draft waiting to send goes back to being edited.
+	delete(v.connecting, thread) // A draft waiting to send goes back to being edited.
 	for _, path := range paths {
 		a := &attachment{name: filepath.Base(path)}
 		s.files[thread] = append(s.files[thread], a)

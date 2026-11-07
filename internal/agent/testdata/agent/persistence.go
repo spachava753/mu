@@ -34,6 +34,8 @@ type openSession struct {
 	waiting     string
 	model, mode string
 	enabled     bool
+	lateConfig  json.RawMessage
+	lateReject  bool
 }
 
 func storeDir() string {

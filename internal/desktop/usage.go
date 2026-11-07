@@ -46,9 +46,16 @@ func (v *View) usageLine(c *ui.Context, thread app.ThreadView, hint bool) {
 			ui.Text(c, fmt.Sprintf("Cost %s %.4f", u.Cost.Currency, u.Cost.Amount)).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(0)
 		}
 		ui.Spacer(c)
-		// Says why Enter does nothing during a turn, whatever the width.
-		if thread.Running {
-			ui.Text(c, "Send when this turn ends").FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
+		// Enter does something else during a turn, so this shows at any width. The
+		// Queue button says the rest when there's no room.
+		if thread.SendsNext() {
+			ui.Text(c, "Enter to send next").FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
+		} else if thread.Running {
+			text := "Ctrl+Enter to steer"
+			if hint {
+				text = "Enter to queue · " + text
+			}
+			ui.Text(c, text).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
 		} else if hint {
 			ui.Text(c, "Enter to send · Shift+Enter for a new line").FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
 		}

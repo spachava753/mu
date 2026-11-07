@@ -30,6 +30,7 @@ type walk struct {
 	width   int
 	height  int
 	a       *app.App
+	v       *desktop.View
 	tt      *ui.Tester
 	agent   string
 	command string
@@ -46,9 +47,9 @@ func startWalk(t *testing.T, name string, width, height int, args string) *walk 
 	agent := testutil.Agent(t)
 	w := &walk{t: t, name: name, width: width, height: height, a: testApp(t), agent: agent, command: fmt.Sprintf("%q %s", agent, args)}
 	t.Cleanup(w.releaseAgent) // Before the app closes.
-	v := desktop.New(w.a, w.command)
-	v.ChooseFiles = func() ([]string, error) { return nil, nil } // As main.go sets it.
-	w.tt = ui.NewTester(v.Draw, width, height)
+	w.v = desktop.New(w.a, w.command)
+	w.v.ChooseFiles = func() ([]string, error) { return nil, nil } // As main.go sets it.
+	w.tt = ui.NewTester(w.v.Draw, width, height)
 	w.tt.SetDark(true)
 	w.tt.Frame()
 	return w
@@ -471,7 +472,7 @@ func (w *walk) inDraftAfterClick() {
 }
 
 // Prepare the next message during a turn: keep writing and attaching while the model
-// works, and press Enter for the next message when it's done.
+// works, and when it's done, press Enter for the next message.
 func TestWorkflowPrepareTheNextMessageDuringATurn(t *testing.T) {
 	eachSize(t, func(t *testing.T, width, height int) {
 		w := startWalk(t, "next-message", width, height, "session-ui")
@@ -529,16 +530,16 @@ func TestWorkflowPrepareTheNextMessageDuringATurn(t *testing.T) {
 		w.absent("Attached file: other.pdf")
 		w.inDraft()
 
-		// Enter is too early: nothing goes, and the line doesn't break.
-		if !w.tt.HasText("Send when this turn ends") {
-			t.Fatalf("nothing says why Enter does nothing: %q", w.tt.Texts())
+		// Enter queues now, so the hint says so. Writing on doesn't send anything.
+		hint := "Enter to queue · Ctrl+Enter to steer"
+		if width == 800 {
+			hint = "Ctrl+Enter to steer" // All that fits.
 		}
-		w.key(0, ui.KeyEnter)
-		if got := w.thread(id).Entries; len(got) != 2 {
-			t.Fatalf("something was sent: %+v", got)
+		if !w.tt.HasText(hint) {
+			t.Fatalf("nothing says what Enter does: %q", w.tt.Texts())
 		}
-		w.agentWasTold("wait")
 		w.typed(" too")
+		w.agentWasTold("wait")
 
 		// The turn ends. The message stays as written, and Enter now sends it.
 		w.click("Stop")
@@ -619,6 +620,422 @@ func TestWorkflowNextMessageWhenATurnEndsByItself(t *testing.T) {
 			t.Fatalf("last entry %q", got)
 		}
 		w.step("sent")
+	})
+}
+
+// waitFor waits for the thread to be running or not, with these prompts queued.
+func (w *walk) waitFor(id string, running bool, queued ...string) {
+	w.t.Helper()
+	waitView(w.t, w.a, w.tt, func(s app.Snapshot) bool {
+		t := w.thread(id)
+		if t.Running != running || len(t.Queue) != len(queued) {
+			return false
+		}
+		for i, q := range t.Queue {
+			if q.Preview != queued[i] {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// Queue prompts: Enter during a turn lines them up, and they go in order, each after
+// the turn before it.
+func TestWorkflowQueuePrompts(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "queue", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		w.typed("permission")
+		w.key(0, ui.KeyEnter)
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 1 })
+		before, _ := w.tt.Find("Message")
+		w.reachable("Queue", "Stop")
+		w.step("running")
+
+		// With nothing written, Enter has nothing to queue, and says nothing.
+		w.key(0, ui.KeyEnter)
+		w.key(ui.Ctrl, ui.KeyEnter)
+		w.noErrors()
+		w.waitFor(id, true)
+
+		w.typed("first")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true, "first")
+		w.inDraft()
+		if draft := w.v.DraftOfSelected(); draft != "" {
+			t.Fatalf("the draft kept %q", draft)
+		}
+		w.reachable("Steer: first", "Remove from queue: first", "Message", "Stop", "Allow once")
+		if after, _ := w.tt.Find("Message"); after != before {
+			t.Fatalf("the draft moved from %+v to %+v", before, after)
+		}
+		w.step("one-queued")
+
+		// The button does the same as Enter, and files go along.
+		w.typed("second")
+		paper := filepath.Join(t.TempDir(), "paper.pdf")
+		if err := os.WriteFile(paper, []byte("%PDF\x00"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		field, _ := w.tt.Find("Message")
+		if !w.tt.DropFiles(field.X+10, field.Y+10, paper) {
+			t.Fatal("the composer didn't take the file")
+		}
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			w.tt.Frame()
+			if _, ok := w.tt.Find("Attached file: paper.pdf"); ok && !w.tt.HasText("Reading…") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("file not read: %q", w.tt.Texts())
+			}
+			time.Sleep(time.Millisecond)
+		}
+		w.click("Queue")
+		w.waitFor(id, true, "first", "second")
+		w.inDraft()
+		w.absent("Attached file: paper.pdf")
+		w.reachable("1 attached")
+		w.agentWasTold("permission")
+		w.step("two-queued")
+
+		// The turn ends, and they go in turn, with the agent told nothing else.
+		w.click("Allow once")
+		w.settled()
+		w.agentWasTold("permission", "first", "second")
+		if blocks := lastPromptBlocks(t, w.agent); !slices.Equal(blocks, []string{"text", "resource"}) {
+			t.Fatalf("blocks %v", blocks)
+		}
+		w.absent("Queued prompts")
+		w.reachable("Message", "Send")
+		w.inDraft()
+		w.step("all-sent")
+		w.noErrors()
+	})
+}
+
+// Steer: Ctrl+Enter interrupts the turn and goes at once. The queue stays as it was,
+// and any prompt in it can steer too.
+func TestWorkflowSteer(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "steer", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		w.typed("wait")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true)
+		w.typed("queued first")
+		w.key(0, ui.KeyEnter)
+		w.typed("queued second")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true, "queued first", "queued second")
+		w.step("queued")
+
+		// The steering prompt is the fixture's "wait", so that its turn stays running.
+		w.typed("wait")
+		w.key(ui.Ctrl, ui.KeyEnter)
+		w.inDraft()
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return len(w.said()) == 2 && s.Threads[0].Running })
+		w.waitFor(id, true, "queued first", "queued second")
+		w.agentWasTold("wait", "wait")
+		if !slices.ContainsFunc(w.thread(id).Entries, func(e state.Entry) bool {
+			return strings.HasPrefix(e.Text, "Stopped.")
+		}) {
+			t.Fatalf("no sign the turn was interrupted: %+v", w.thread(id).Entries)
+		}
+		w.reachable("Steer: queued first", "Steer: queued second", "Stop", "Message")
+		w.step("steered")
+
+		// The second in line goes now, and the first stays behind.
+		w.click("Steer: queued second")
+		w.inDraft()
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Queue) == 0 })
+		w.agentWasTold("wait", "wait", "queued second", "queued first")
+		if got := w.lastEntry(id); got != "Echo: queued first" {
+			t.Fatalf("last entry %q", got)
+		}
+		w.step("queue-done")
+		w.noErrors()
+	})
+}
+
+// Ctrl+Enter with no turn to interrupt is just sending.
+func TestWorkflowSteerWithNothingRunning(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "steer-idle", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		w.typed("hello")
+		w.key(ui.Ctrl, ui.KeyEnter)
+		w.settled()
+		w.agentWasTold("hello")
+		if got := w.lastEntry(id); got != "Echo: hello" {
+			t.Fatalf("last entry %q", got)
+		}
+		w.noErrors()
+	})
+}
+
+// Read back during a turn: queueing leaves the view where the person scrolled, and
+// steering, which sends at once, goes to the latest.
+func TestWorkflowQueueWhileReadingBack(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "queue-reading-back", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		for range 4 {
+			w.typed("padding\n\npadding\n\npadding\n\npadding\n\npadding\n\npadding")
+			w.key(0, ui.KeyEnter)
+			w.settled()
+		}
+		w.typed("wait")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true)
+		message, _ := w.tt.Find("Message")
+		w.tt.Scroll(message.X+40, 200, 0, -100000)
+		w.tt.Frame()
+		w.tt.Advance(320 * time.Millisecond)
+		w.reachable("Jump to latest")
+		w.click("Message")
+		w.typed("later")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true, "later")
+		w.reachable("Jump to latest", "Steer: later")
+		w.step("queued")
+
+		w.click("Steer: later")
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return !w.thread(id).Running })
+		w.absent("Jump to latest")
+		if got := w.lastEntry(id); got != "Echo: later" {
+			t.Fatalf("last entry %q", got)
+		}
+		w.step("steered")
+	})
+}
+
+// Stop means stop: what's queued stays, but doesn't go by itself. The next message
+// goes straight away, and the queue carries on after it.
+func TestWorkflowStopHoldsTheQueue(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "stop-holds-queue", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		w.typed("wait")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true)
+		for _, text := range []string{"later", "unwanted", "last"} {
+			w.typed(text)
+			w.key(0, ui.KeyEnter)
+		}
+		w.waitFor(id, true, "later", "unwanted", "last")
+		w.click("Stop")
+		w.inDraft()
+		w.waitFor(id, false, "later", "unwanted", "last")
+		w.agentWasTold("wait")
+		w.reachable("Send: later", "Remove from queue: later", "Message", "Send")
+		if !w.tt.HasText("Paused. These continue after your next message.") {
+			t.Fatalf("nothing says why they're waiting: %q", w.tt.Texts())
+		}
+		w.step("held")
+
+		w.click("Remove from queue: unwanted")
+		w.inDraft()
+		w.waitFor(id, false, "later", "last")
+
+		// The next message goes straight away, and the rest follow it.
+		w.typed("correction")
+		w.key(0, ui.KeyEnter)
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Queue) == 0 })
+		w.agentWasTold("wait", "correction", "later", "last")
+		w.step("resumed")
+
+		// Sending one from a held queue goes now.
+		w.typed("wait")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true)
+		w.typed("held again")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true, "held again")
+		w.click("Stop")
+		w.waitFor(id, false, "held again")
+		w.click("Send: held again")
+		w.inDraft()
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running && len(s.Threads[0].Queue) == 0 })
+		if got := w.lastEntry(id); got != "Echo: held again" {
+			t.Fatalf("last entry %q", got)
+		}
+		w.noErrors()
+	})
+}
+
+// Enter straight after Stop is the correction, not the end of the line.
+func TestWorkflowCorrectionWhileStopping(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "correction-while-stopping", width, height, "session-ui slow-cancel")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		w.typed("wait")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true)
+		w.typed("later")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true, "later")
+		w.click("Stop")
+		// The turn is ending, so what's written now is the next message, and the
+		// composer says so.
+		if !w.tt.HasText("Enter to send next") {
+			t.Fatalf("nothing says Enter sends next: %q", w.tt.Texts())
+		}
+		w.reachable("Send", "Send: later")
+		w.absent("Queue", "Steer: later")
+		w.step("stopping-before-typing")
+		w.typed("correction")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, true, "correction", "later")
+		if !w.tt.HasText("Sends when the turn stops") {
+			t.Fatalf("no sign it's going next: %q", w.tt.Texts())
+		}
+		w.reachable("Remove from queue: correction", "Send: later")
+		w.step("stopping")
+		w.waitFor(id, false)
+		w.agentWasTold("wait", "correction", "later")
+	})
+}
+
+// Many queued prompts scroll, and leave the draft and its actions in the window, also
+// beside a permission request and in the light theme.
+func TestWorkflowLongQueue(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "long-queue", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.typed("permissions-two")
+		w.key(0, ui.KeyEnter)
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 2 })
+		before, _ := w.tt.Find("Message")
+		for i := range 8 {
+			w.typed(fmt.Sprintf("prompt %d with enough text in it to need truncating once it reaches the edge of the row it is shown in, which it does", i))
+			w.key(0, ui.KeyEnter)
+		}
+		w.waitForCount(id, 8)
+		w.reachable("Message", "Queue", "Stop", "Allow once", "Queued prompts")
+		if got, _ := w.tt.Find("Message"); got != before {
+			t.Fatalf("the draft moved from %+v to %+v", before, got)
+		}
+		list, _ := w.tt.Find("Queued prompts")
+		if list.H > 125 {
+			t.Fatalf("the queue takes %v", list.H)
+		}
+		// A long draft too, then the end of the queue.
+		for i := range 5 {
+			if i > 0 {
+				w.key(ui.Shift, ui.KeyEnter)
+			}
+			w.typed(fmt.Sprintf("line %d", i))
+		}
+		w.tt.Scroll(list.X+40, list.Y+10, 0, 10000)
+		w.tt.Frame()
+		w.tt.Advance(320 * time.Millisecond)
+		w.reachable("Message", "Queue", "Stop", "Allow once", "Steer: "+w.thread(id).Queue[7].Preview, "Remove from queue: "+w.thread(id).Queue[7].Preview)
+		list, _ = w.tt.Find("Queued prompts")
+		remove, _ := w.tt.Find("Remove from queue: " + w.thread(id).Queue[7].Preview)
+		if remove.X+remove.W > list.X+list.W-8 {
+			t.Fatalf("the scroll bar is over the last remove button: %+v in %+v", remove, list)
+		}
+		w.step("scrolled")
+		w.step("dark")
+		w.tt.SetDark(false)
+		w.tt.Frame()
+		w.step("light")
+		w.tt.SetDark(true)
+		w.click("Stop")
+		w.settled()
+		w.reachable("Message", "Send", "Queued prompts")
+		w.step("held")
+	})
+}
+
+func (w *walk) waitForCount(id string, n int) {
+	w.t.Helper()
+	waitView(w.t, w.a, w.tt, func(s app.Snapshot) bool { return len(w.thread(id).Queue) == n })
+}
+
+// A turn that ends in an error holds the queue, and the next message gets it going.
+func TestWorkflowQueueHeldAfterAnError(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "held-after-error", width, height, "session-ui")
+		id := w.openFirstThread()
+		w.settled()
+		w.inDraft()
+		w.typed("permission")
+		w.key(0, ui.KeyEnter)
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 1 })
+		for _, text := range []string{"prompt-error", "after error", "max-tokens"} {
+			w.typed(text)
+			w.key(0, ui.KeyEnter)
+		}
+		w.waitFor(id, true, "prompt-error", "after error", "max-tokens")
+		w.click("Allow once")
+		w.waitFor(id, false, "after error", "max-tokens")
+		if !w.tt.HasText("Paused. These continue after your next message.") || !w.tt.HasText("Agent error: provider overloaded") {
+			t.Fatalf("nothing says what happened: %q", w.tt.Texts())
+		}
+		w.reachable("Send: after error", "Message", "Send")
+		w.inDraft()
+		w.step("held")
+
+		w.typed("hello")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(id, false)
+		w.agentWasTold("permission", "prompt-error", "hello", "after error", "max-tokens")
+		w.typed("again")
+		w.key(0, ui.KeyEnter) // Nothing's queued after the limit, so this goes now.
+		w.settled()
+		w.agentWasTold("permission", "prompt-error", "hello", "after error", "max-tokens", "again")
+		w.step("resumed")
+	})
+}
+
+// Work across threads: each has its own queue, and it goes on out of view.
+func TestWorkflowQueueOutOfView(t *testing.T) {
+	eachSize(t, func(t *testing.T, width, height int) {
+		w := startWalk(t, "queue-out-of-view", width, height, "session-ui")
+		first := w.openFirstThread()
+		w.settled()
+		if err := w.a.Rename(first, "First"); err != nil {
+			t.Fatal(err)
+		}
+		w.inDraft()
+		w.typed("permission")
+		w.key(0, ui.KeyEnter)
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool { return len(w.thread(first).Permissions) == 1 })
+		w.typed("from first")
+		w.key(0, ui.KeyEnter)
+		w.waitFor(first, true, "from first")
+		permission := w.thread(first).Permissions[0]
+
+		w.click("New thread")
+		w.click("Create thread")
+		w.tt.Frame()
+		w.absent("Steer: from first")
+		// The first thread's turn ends while the second is in view.
+		w.a.Answer(first, permission.ID, permission.Request.Options[0].OptionID)
+		waitView(t, w.a, w.tt, func(s app.Snapshot) bool {
+			return !w.thread(first).Running && w.lastEntry(first) == "Echo: from first"
+		})
+		if got := w.thread(first).Queue; len(got) != 0 {
+			t.Fatalf("queue %+v", got)
+		}
+		w.absent("Queued prompts")
 	})
 }
 

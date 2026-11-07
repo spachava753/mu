@@ -28,6 +28,14 @@ _Avoid_: Environment, sandbox
 A file sent with a prompt, after its text. Whether it can be used is for the agent to say.
 _Avoid_: Upload
 
+**Queued prompt**:
+A prompt waiting for the turn before it to finish, sent as written, in order.
+_Avoid_: Pending message
+
+**Steer**:
+Interrupting a running turn to send a prompt as soon as the agent has ended it. The queue stays and carries on after it. There's no ACP method for this: it is `session/cancel` and then `session/prompt`.
+_Avoid_: Inject
+
 **Agent connection**:
 One running agent process that serves the sessions of every thread using the same agent configuration, and its discovery. A saved agent's connection stays open while idle.
 _Avoid_: Thread process

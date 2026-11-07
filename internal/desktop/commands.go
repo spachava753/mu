@@ -45,21 +45,21 @@ func (p *commandPicker) matches(text string, commands []acp.AvailableCommand) []
 // anchors the slash-command suggestions.
 func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) ui.Element {
 	p := &v.picker
-	queued, waiting := v.queued[t.ID]
+	connecting, waiting := v.connecting[t.ID]
 	if waiting {
-		*v.draft(t.ID) = queued // What shows is what will go out.
+		*v.draft(t.ID) = connecting // What shows is what will go out.
 	}
 	services := c.Services()
 	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).ReadOnly(waiting).OnPaste(func(text string) bool {
-		if _, waiting := v.queued[t.ID]; waiting {
+		if _, waiting := v.connecting[t.ID]; waiting {
 			return false
 		}
 		return v.pasteFiles(services, t.ID, text)
 	}).OnTextKey(func(k ui.TextKey) bool {
-		if _, waiting := v.queued[t.ID]; waiting {
+		if _, waiting := v.connecting[t.ID]; waiting {
 			// Waiting to send: another Enter changes nothing, and Escape takes it back.
 			if k.Key == ui.KeyEscape && k.Mods == 0 {
-				v.unqueue(t.ID)
+				v.keepEditing(t.ID)
 				return true
 			}
 			return k.Key == ui.KeyEnter
@@ -89,22 +89,26 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 				}
 			}
 		}
-		if k.Key == ui.KeyEnter && k.Mods == 0 {
+		steer := k.Mods == ui.Ctrl || k.Mods == ui.Cmd
+		if k.Key == ui.KeyEnter && (k.Mods == 0 || steer) {
 			// As it is now: a turn can start or end after this was drawn.
 			now, found := v.threadNow(t.ID)
-			if !found || now.Running {
-				return true // The next message can be written, but goes only after this turn.
+			if !found {
+				return true
+			}
+			if now.Running && strings.TrimSpace(k.Text()) == "" && len(v.attach.files[t.ID]) == 0 {
+				return true // Nothing to queue or steer with.
 			}
 			if v.stillReading(t.ID) {
 				return true // It goes once its files are read: Enter again.
 			}
 			switch {
-			case !now.Configuring:
-				if v.send(t.ID, k.Text()) {
+			case now.Running || !now.Configuring:
+				if v.send(t.ID, k.Text(), steer) {
 					k.SetText("")
 				}
 			case !now.Connected:
-				v.queue(t.ID, k.Text())
+				v.sendOnceConnected(t.ID, k.Text())
 			}
 			return true
 		}

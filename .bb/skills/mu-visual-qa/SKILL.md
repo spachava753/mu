@@ -7,6 +7,25 @@ description: "Capture and visually inspect Mu's native UI using its offline Go t
 
 Use the existing MyGo harness, not a second test framework or a mock UI. It runs Mu's actual `View.Draw` with scripted input and an offline ACP fixture. These are headless application renders, not captures of an OS window.
 
+## Run it in its own thread
+
+Visual QA runs in a BB thread of its own, so that its judgment of the screens isn't anchored on the implementation's. Unless the user chooses otherwise, that's **Claude Code, Opus 5.5, high**: provider `claude-code`, model `claude-opus-5-5`, reasoning level `high`. Check the target environment lists them (`bb provider models claude-code --environment <env> --json`) and ask before using anything else.
+
+It is never the review-loop reviewer, or any other thread: each has its own job and its own context. Reuse the QA thread for later rounds of the same work, with `bb thread tell`, rather than starting another.
+
+If you are the thread making the change, spawn it with a brief and continue other work:
+
+```sh
+bb thread spawn --project <project> --environment <this environment> --parent-self \
+  --provider claude-code --model claude-opus-5-5 --reasoning-level high \
+  --parent-notifications auto --visibility visible \
+  --title 'Visual QA: <change>' --prompt-file <brief> --json
+```
+
+Use the same environment, so the thread sees the uncommitted change. The brief says what changed and what it's for, which screens and workflows it touches, the base commit, and that the thread is the QA thread for it, so it follows this skill from [Choose coverage](#choose-coverage) on rather than spawning another. Don't send your own conclusions about how it looks.
+
+If you are the QA thread, do the QA: capture, inspect, and walk the workflows below. Don't change project files, which the thread that made the change owns. Write captures and anything else under `.qa/`. Report what you found and where, with links to the images. For each workflow the change touches that no `TestWorkflow*` script covers, propose the script's steps and assertions, so that the thread making the change can add it to `workflows_test.go`. End with what you checked and an explicit verdict: findings remain, or there are none. On a later round, check the fixes, then look at everything again.
+
 ## Choose coverage
 
 Run commands from the repository root, not this skill directory. Read the relevant scenario and helpers before changing a test. The source links below are relative to this skill directory.
@@ -26,6 +45,7 @@ Run commands from the repository root, not this skill directory. Read the releva
 | Slash completion and composer focus | `TestSlashCommandPicker` in [composer_test.go](../../../internal/desktop/composer_test.go) | `slash-commands-*` |
 | Add to prompt popup on a reply's selection, and the quote in the draft | `TestAddSelectionToPrompt` in [composer_test.go](../../../internal/desktop/composer_test.go) | `add-to-prompt-*` |
 | Attachments: cards in a draft, many files, a file being read, files in a sent message, composing during a turn | `TestAttachmentsFollowTheText`, `TestManyAttachmentsLeaveTheComposerInTheWindow`, `TestSendWaitsForFilesToBeRead`, `TestAttachingDuringATurn`, `TestComposingDuringATurn` in [attachments_test.go](../../../internal/desktop/attachments_test.go) | `attachments-*`, `composing-during-turn-*` |
+| Queued prompts: in order, steering, held after Stop, long queue, light and dark | `TestWorkflowQueuePrompts`, `TestWorkflowSteer`, `TestWorkflowStopHoldsTheQueue`, `TestWorkflowCorrectionWhileStopping`, `TestWorkflowLongQueue` in [workflows_test.go](../../../internal/desktop/workflows_test.go), `TestQueuedPromptOpens` in [motion_test.go](../../../internal/desktop/motion_test.go) | `workflow-queue-*`, `workflow-steer-*`, `workflow-stop-holds-queue-*`, `workflow-correction-while-stopping-*`, `workflow-long-queue-*` |
 | Discovery and selective import, scrolled list | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*`, `session-import-scrolled-*` |
 | Motion, reversal, reduced motion | Tests in [motion_test.go](../../../internal/desktop/motion_test.go) and [disclosure_test.go](../../../internal/desktop/disclosure_test.go) | `TestRecordMotion` writes `mu-motion.gif`; the other tests assert intermediate states |
 
@@ -51,12 +71,15 @@ The last column names the script, or otherwise the closest scenario, which cover
 | New thread, first message | Create a thread, type, send | Focus goes to the draft; sending while the agent starts goes out once it's connected | **Scripted:** `TestWorkflowNewThreadFirstMessage`, `TestWorkflowFirstMessageBeforeTheAgentStarts` |
 | Choose settings first | Create a thread, change the model or thinking level, type, send | Options appear before the first message; "Updating session…" doesn't lose what's typed or jump the composer; the turn uses the chosen value | **Scripted:** `TestWorkflowChooseSettingsFirst`, `TestWorkflowChooseSettingsWhileWriting` |
 | Abandon a new thread | Create a thread, at once create another, then remove the first or just navigate away | Each action works while the first is still connecting, or says why not; no error lands on the wrong thread; the first's title and session stay correct when it finishes | **Scripted:** `TestWorkflowAbandonNewThread`, `TestWorkflowNavigateAwayFromAStartingThread` |
-| Prepare the next message during a turn | While the model generates, write a prompt and attach files, then press Enter for the next message | The draft keeps the focus; typing, paste, slash completion, the paperclip, cards and remove buttons stay usable; Enter does nothing until the turn ends or is stopped, and sends once it has | **Scripted:** `TestWorkflowPrepareTheNextMessageDuringATurn`, `TestWorkflowNextMessageWhenATurnEndsByItself` |
+| Prepare the next message during a turn | While the model generates, write a prompt and attach files, then send it once the turn ends | The draft keeps the focus; typing, paste, slash completion, the paperclip, cards and remove buttons stay usable; nothing goes until Enter | **Scripted:** `TestWorkflowPrepareTheNextMessageDuringATurn`, `TestWorkflowNextMessageWhenATurnEndsByItself` |
+| Queue prompts | During a turn, press Enter on several prompts, with files, and let the turn end | The draft empties, keeps the focus and doesn't move; prompts show in order, with their files, and go one per turn; a long queue scrolls and leaves the draft and Stop in the window; a queue goes on in a thread out of view; queueing leaves a reader where they scrolled, and steering goes to the latest | **Scripted:** `TestWorkflowQueuePrompts`, `TestWorkflowLongQueue`, `TestWorkflowQueueOutOfView`, `TestWorkflowQueueWhileReadingBack` |
+| Steer | During a turn with prompts queued, press Ctrl+Enter, then **Steer** on a queued prompt | The turn is interrupted and the prompt goes at once; what's queued stays, in order, and carries on; a slow stop shows it waiting | **Scripted:** `TestWorkflowSteer`, `TestWorkflowSteerWithNothingRunning`, `TestWorkflowCorrectionWhileStopping` |
+| Stop with a queue | Queue prompts, stop, remove one, send a correction | Nothing goes by itself after Stop, and a line says why; the correction goes first and the rest follow it; a held prompt's **Send** works | **Scripted:** `TestWorkflowStopHoldsTheQueue`, `TestWorkflowCorrectionWhileStopping`, `TestWorkflowQueueHeldAfterAnError` |
 | Switch models mid-conversation | Exchange messages, change the model, send, change it during a turn if it's offered | History stays; usage and options update; a rejected change keeps the old value and shows the agent's error | **Scripted:** `TestWorkflowSwitchModelMidConversation`, `TestWorkflowSwitchModelDuringATurn`, except a rejected change |
 | Stop and correct | Send, stop mid-reply, write a correction, send | Stop responds at once; partial text stays; the draft is ready straight away; unfinished tool calls read as cancelled | **Scripted:** `TestWorkflowStopAndCorrect`, except tool calls, which `TestQAConversation` covers |
 | Answer permissions | Send, get a permission card, read its details, answer, get another | The composer and Stop stay in the window beside several cards; the card names the tool; the turn resumes | `TestQAPermissionCards`, `TestComposerKeepsRoomWithPermissions` |
 | Work across threads | Send in one thread, switch to another while it runs, send there, switch back | Each keeps its own draft, files, scroll and status; the sidebar shows which are working or need permission; nothing streams into the wrong thread | **Scripted:** `TestWorkflowSwitchThreadsWhileOneRuns`, except scroll and files, which `TestDraftsKeepTheirFilesAcrossThreads` covers |
-| Read back during a long reply | While a reply streams, scroll up to read, then return | The view stays where the person scrolled; **Jump to latest** appears and works; selecting text keeps working | `TestAddSelectionWhileAgentWorks`, `TestAddSelectionFollowsScroll` |
+| Read back during a long reply | While a reply streams, scroll up to read, then return | The view stays where the person scrolled; **Jump to latest** appears and works; selecting text keeps working | `TestAddSelectionWhileAgentWorks`, `TestAddSelectionFollowsScroll`; queueing while scrolled up is **Scripted:** `TestWorkflowQueueWhileReadingBack` |
 | Attach and send | Text with an image; files alone; a file the agent refuses, then a follow-up | Cards show kind and size; **Send** waits for reads; a refusal shows in the thread and the session goes on | `TestAttachmentsFollowTheText`, `TestFilesAloneCanBeSent` |
 | Quote and reply | Select part of a reply, **Add to prompt**, write around it, send | The popup is near the pointer; the draft keeps what was there; focus returns | `TestAddSelectionToPrompt` |
 | Slash command | Type `/`, filter, pick with the keyboard, add arguments, send | Completion never sends; the picker leaves the composer visible | `TestSlashCommandPicker` |

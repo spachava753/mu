@@ -15,6 +15,12 @@ var (
 		Colors: true, Duration: 160 * time.Millisecond,
 		Enter: &ui.Motion{}, Exit: &ui.Motion{},
 	}
+	// A queued prompt opens room for itself and leaves at once: the composer is held
+	// at the bottom, so that a copy leaving would only go behind the draft.
+	queueMotion = ui.ElementTransition{
+		Colors: true, Duration: 160 * time.Millisecond,
+		Enter: &ui.Motion{Collapse: true},
+	}
 	popupMotion = ui.ElementTransition{
 		Colors: true, Duration: 160 * time.Millisecond,
 		Enter: &ui.Motion{Scale: 0.98}, Exit: &ui.Motion{Scale: 0.98},

@@ -290,6 +290,13 @@ func main() {
 				notOpen(m.ID, p.SessionID)
 				continue
 			}
+			if slices.Contains(os.Args, "late-config") && s.pending != nil {
+				// The turn ends first, and this is answered just after.
+				var value string
+				_ = json.Unmarshal(p.Value, &value)
+				s.lateConfig, s.lateReject = m.ID, value == "reject"
+				continue
+			}
 			if p.ConfigID == "model" {
 				var value string
 				_ = json.Unmarshal(p.Value, &value)
@@ -439,6 +446,15 @@ func main() {
 				if s := open[session]; s != nil && s.pending != nil {
 					update(session, "agent_message_chunk", "Permission: "+string(m.Result))
 					finish(s, "end_turn")
+					if s.lateConfig != nil {
+						time.Sleep(100 * time.Millisecond)
+						if s.lateReject {
+							reject(s.lateConfig)
+						} else {
+							reply(s.lateConfig, map[string]any{"configOptions": options(s.model, s.enabled)})
+						}
+						s.lateConfig = nil
+					}
 				}
 			}
 			if rest, ok := strings.CutPrefix(id, "two:"); ok {

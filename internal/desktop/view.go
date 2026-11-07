@@ -24,7 +24,7 @@ type View struct {
 	creating, archived, deleting         bool
 	settingsOpen, usageOpen              bool
 	focused                              string            // the thread the app was last told is in view
-	queued                               map[string]string // messages to send once their threads connect
+	connecting                           map[string]string // messages to send once their threads connect
 	drag                                 sidebarDrag
 	springing                            bool
 	sidebarShown                         float32 // as of the last frame
@@ -69,7 +69,7 @@ func New(a *app.App, command string) *View {
 	if command == "" {
 		command = s.LastCommand
 	}
-	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, builtins: newBuiltinEditor(), drafts: map[string]*string{}, attach: newAttachments(), queued: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
+	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, builtins: newBuiltinEditor(), drafts: map[string]*string{}, attach: newAttachments(), connecting: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
 	v.builtins.load(s.Builtins) // Check again works from more than Settings, and saves this.
 	for _, t := range s.Threads {
 		if !t.Archived {
@@ -157,54 +157,63 @@ func (v *View) disclosure(key string) *bool {
 	}
 	return v.expanded[key]
 }
-func (v *View) send(id, text string) bool {
+
+// send submits the draft: it starts a turn, or during one, joins the queue or with
+// steer interrupts the turn.
+func (v *View) send(id, text string, steer bool) bool {
 	if v.stillReading(id) {
 		return false
 	}
-	if err := v.app.SendParts(id, draftParts(text, v.attach.files[id])); err != nil {
+	thread, _ := v.threadNow(id)
+	submit := v.app.Queue
+	if steer {
+		submit = v.app.Steer
+	}
+	if err := submit(id, draftParts(text, v.attach.files[id])); err != nil {
 		v.fail(err)
 		return false
 	}
 	*v.draft(id), v.err = "", ""
 	v.attach.forget(id)
-	if list := v.lists[id]; list != nil {
+	// Queueing changes nothing in the conversation, which may be being read.
+	if list := v.lists[id]; list != nil && (steer || !thread.Running) {
 		list.ScrollToEnd()
 	}
 	return true
 }
 
-// queue sends a message as soon as the thread's session is connected. The draft
-// shows it, read-only, until then, so what goes out is what the user saw.
-func (v *View) queue(id, text string) {
+// sendOnceConnected sends a message as soon as the thread's session is connected. The
+// draft shows it, read-only, until then, so what goes out is what the user saw.
+func (v *View) sendOnceConnected(id, text string) {
 	if strings.TrimSpace(text) != "" || len(v.attach.files[id]) > 0 {
-		v.queued[id] = text
+		v.connecting[id] = text
 	}
 }
 
-// unqueue takes a draft back for editing.
-func (v *View) unqueue(id string) {
-	delete(v.queued, id)
+// keepEditing takes a draft back for editing.
+func (v *View) keepEditing(id string) {
+	delete(v.connecting, id)
 	v.picker.refocus = id == v.selected
 }
 
-// sendQueued sends the drafts whose threads have connected. If connecting failed
+// sendConnected sends the drafts whose threads have connected. If connecting failed
 // there is nothing to send on, so the draft returns to the user.
-func (v *View) sendQueued() {
-	if len(v.queued) == 0 {
+func (v *View) sendConnected() {
+	if len(v.connecting) == 0 {
 		return
 	}
 	s := v.app.Snapshot()
-	for id, text := range v.queued {
+	for id, text := range v.connecting {
 		i := slices.IndexFunc(s.Threads, func(t app.ThreadView) bool { return t.ID == id })
 		switch {
 		case i < 0 || s.Threads[i].Archived:
-			delete(v.queued, id)
+			delete(v.connecting, id)
 		case s.Threads[i].Configuring || s.Threads[i].Running:
 		case s.Threads[i].Connected && s.Threads[i].SessionError == "":
-			delete(v.queued, id)
-			v.send(id, text)
+			delete(v.connecting, id)
+			v.send(id, text, false)
 		default:
-			delete(v.queued, id)
+			delete(v.connecting, id)
 		}
 	}
 }
@@ -307,7 +316,7 @@ func (v *View) Draw(c *ui.Context) {
 		}
 	}
 	v.collectAttachments(c.Services())
-	v.sendQueued()
+	v.sendConnected()
 	if v.focused != v.selected {
 		v.focused = v.selected
 		v.app.FocusThread(v.selected)
@@ -923,9 +932,10 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 				v.gitLine(c, thread.Git, thread.PullRequest)
 				return
 			}
+			v.promptQueue(c, thread)
 			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(8).Border(1, hairline(t)).Background(t.Surface)
 			// Files can be got ready for the next message while a turn runs.
-			_, sending := v.queued[thread.ID]
+			_, sending := v.connecting[thread.ID]
 			editable := !sending
 			services := c.Services()
 			box.Children(func() {
@@ -947,7 +957,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					ui.Row(c).AlignSelf(ui.End).Shrink(0).Gap(2).Children(func() {
 						if thread.Running || thread.Configuring {
 							status := connectingText(thread, "Updating session…")
-							if _, waiting := v.queued[thread.ID]; waiting {
+							if _, waiting := v.connecting[thread.ID]; waiting {
 								status = "Sends when ready…"
 							}
 							if thread.Running {
@@ -966,22 +976,31 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 								label.SingleLine().MaxWidth(statusWidth).Margin(0, 6, 0, 0)
 							}
 						}
-						_, waiting := v.queued[thread.ID]
+						_, waiting := v.connecting[thread.ID]
+						empty := strings.TrimSpace(*v.draft(thread.ID)) == "" && len(v.attach.files[thread.ID]) == 0
 						switch {
 						case thread.Running:
+							label, icon, tip := "Queue", queueIcon, "Queue · Enter"
+							if thread.SendsNext() {
+								label, icon, tip = "Send", sendIcon, "Send when the turn stops · Enter"
+							}
+							roundButton(c, label, icon, true, empty || v.stillReading(thread.ID)).Tooltip(tip).OnClick(func() {
+								v.send(thread.ID, *v.draft(thread.ID), false)
+								v.picker.refocus = true
+							})
 							roundButton(c, "Stop", stopIcon, false, false).OnClick(func() {
 								v.app.Stop(thread.ID)
 								v.picker.refocus = true
 							})
 						case waiting:
-							roundButton(c, "Cancel sending", stopIcon, false, false).OnClick(func() { v.unqueue(thread.ID) })
+							roundButton(c, "Cancel sending", stopIcon, false, false).OnClick(func() { v.keepEditing(thread.ID) })
 						default:
-							disabled := (strings.TrimSpace(*v.draft(thread.ID)) == "" && len(v.attach.files[thread.ID]) == 0) || (thread.Configuring && thread.Connected) || v.stillReading(thread.ID)
+							disabled := empty || (thread.Configuring && thread.Connected) || v.stillReading(thread.ID)
 							roundButton(c, "Send", sendIcon, true, disabled).OnClick(func() {
 								if thread.Configuring {
-									v.queue(thread.ID, *v.draft(thread.ID))
+									v.sendOnceConnected(thread.ID, *v.draft(thread.ID))
 								} else {
-									v.send(thread.ID, *v.draft(thread.ID))
+									v.send(thread.ID, *v.draft(thread.ID), false)
 								}
 							})
 						}

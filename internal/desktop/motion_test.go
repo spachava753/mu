@@ -501,3 +501,74 @@ func TestWorkingTextShimmers(t *testing.T) {
 		})
 	}
 }
+
+// A queued prompt opens the room it needs, leaving the draft still.
+func TestQueuedPromptOpens(t *testing.T) {
+	w := startWalk(t, "queue-motion", 1100, 780, "session-ui")
+	id := w.openFirstThread()
+	w.settled()
+	w.typed("wait")
+	w.key(0, ui.KeyEnter)
+	w.waitFor(id, true)
+	message, _ := w.tt.Find("Message")
+	still := func() {
+		t.Helper()
+		if got, _ := w.tt.Find("Message"); got != message {
+			t.Fatalf("the draft moved from %+v to %+v", message, got)
+		}
+	}
+	const rowHeight = 30
+	empty := w.tt.Image()
+
+	w.typed("later")
+	w.tt.Key(0, ui.KeyEnter)
+	w.tt.Frame()
+	w.tt.Advance(60 * time.Millisecond)
+	still()
+	list, ok := w.tt.Find("Queued prompts")
+	if !ok || list.H <= 0 || list.H >= rowHeight {
+		t.Fatalf("the row isn't opening: %+v", list)
+	}
+	entering := w.tt.Image()
+	w.tt.Advance(320 * time.Millisecond)
+	still()
+	list, _ = w.tt.Find("Queued prompts")
+	if list.H != rowHeight {
+		t.Fatalf("the open row is %+v", list)
+	}
+	shown := w.tt.Image()
+	if !imagesDiffer(entering, shown, list) || !imagesDiffer(entering, empty, list) {
+		t.Fatal("the row didn't appear gradually")
+	}
+
+	if err := w.tt.Click("Remove from queue: later"); err != nil {
+		t.Fatal(err)
+	}
+	w.tt.Frame()
+	still()
+	w.absent("Queued prompts")
+
+	// With less motion nothing changes size: it's there at once.
+	w.tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	w.typed("again")
+	w.tt.Key(0, ui.KeyEnter)
+	w.tt.Frame()
+	w.tt.Frame()
+	list, _ = w.tt.Find("Queued prompts")
+	if list.H != rowHeight {
+		t.Fatalf("the row ignored reduced motion: %+v", list)
+	}
+	still()
+}
+
+// imagesDiffer compares two frames within a rectangle.
+func imagesDiffer(a, b *image.RGBA, r ui.Rect) bool {
+	for y := int(r.Y); y < int(r.Y+r.H); y++ {
+		for x := int(r.X); x < int(r.X+r.W); x++ {
+			if a.RGBAAt(x, y) != b.RGBAAt(x, y) {
+				return true
+			}
+		}
+	}
+	return false
+}

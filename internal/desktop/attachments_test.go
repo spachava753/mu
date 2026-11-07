@@ -361,15 +361,6 @@ func TestComposingDuringATurn(t *testing.T) {
 			f.settle(t, "the file", func() bool { return !f.tt.HasText("Reading…") })
 			screenshot(t, f.tt, fmt.Sprintf("composing-during-turn-%d", size[0]))
 
-			// Enter does nothing yet: it neither sends nor breaks the line.
-			f.tt.Key(0, ui.KeyEnter)
-			f.tt.Frame()
-			if got, want := f.draft(), "next\nprompt pasted"; got != want {
-				t.Fatalf("after Enter, draft %q, want %q", got, want)
-			}
-			if n := len(f.a.Snapshot().Threads[0].Entries); n != 2 {
-				t.Fatalf("sent during the turn: %d entries", n)
-			}
 			if _, ok := f.tt.Find("Send"); ok {
 				t.Fatal("offered Send during the turn")
 			}
@@ -405,11 +396,6 @@ func TestDraftWrittenDuringATurnSendsWhenItEnds(t *testing.T) {
 	waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 1 })
 	f.tt.Type("next")
 	f.tt.Frame()
-	f.tt.Key(0, ui.KeyEnter)
-	f.tt.Frame()
-	if !f.a.Snapshot().Threads[0].Running || f.draft() != "next" {
-		t.Fatalf("running %v, draft %q", f.a.Snapshot().Threads[0].Running, f.draft())
-	}
 	click(t, f.tt, "Allow once")
 	waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running })
 	if got := f.draft(); got != "next" {
