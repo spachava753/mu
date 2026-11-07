@@ -79,13 +79,29 @@ func New(a *app.App, command string) *View {
 	}
 	v.creating = v.selected == ""
 	if v.selected != "" {
+		v.picker.refocus = true
 		v.loadSelected()
 	}
 	return v
 }
+
+// dialogOpen reports whether a modal dialog has the keyboard.
+func (v *View) dialogOpen() bool {
+	return v.deleting || v.renaming || v.projects.open || v.projects.removing || v.worktrees.open || v.worktrees.confirming || v.removeAgent
+}
+
+// threadNow is a thread as it is at this moment, for handling input between frames.
+func (v *View) threadNow(id string) (app.ThreadView, bool) {
+	for _, t := range v.app.Snapshot().Threads {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return app.ThreadView{}, false
+}
 func (v *View) selectThread(id string) {
 	v.importOpen = false
-	v.picker, v.usageOpen = commandPicker{}, false
+	v.picker, v.usageOpen = commandPicker{refocus: true}, false
 	v.selected, v.creating, v.settingsOpen, v.err = id, false, false, ""
 	v.loadSelected()
 }
@@ -232,6 +248,7 @@ func (v *View) bulkArchive(order []string) {
 func (v *View) removeThreads() {
 	result, err := v.app.DeleteThreads(v.deleteIDs)
 	v.deleting = false
+	v.picker.refocus = true
 	if err != nil {
 		v.fail(err)
 		return
@@ -296,7 +313,7 @@ func (v *View) Draw(c *ui.Context) {
 		v.app.FocusThread(v.selected)
 	}
 	matte(c)
-	if v.selection.active() && !v.deleting && !v.renaming && !v.projects.open && !v.projects.removing && !v.worktrees.open && !v.worktrees.confirming {
+	if v.selection.active() && !v.dialogOpen() {
 		c.OnShortcut(0, ui.KeyEscape, v.endSelection)
 	}
 	v.md.Theme = markdownTheme(c.Theme())
@@ -907,8 +924,9 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 				return
 			}
 			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(8).Border(1, hairline(t)).Background(t.Surface)
+			// Files can be got ready for the next message while a turn runs.
 			_, sending := v.queued[thread.ID]
-			editable := !thread.Running && !sending
+			editable := !sending
 			services := c.Services()
 			box.Children(func() {
 				if v.messageInput(c, thread, box).Focused() {
@@ -916,8 +934,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 				}
 				v.attachmentStrip(c, thread.ID, editable)
 				ui.Row(c).Padding(0, 6, 6, 7).Gap(2).Children(func() {
-					// Not during a turn, when it couldn't be used and the status needs the room.
-					if v.ChooseFiles != nil && !thread.Running {
+					if v.ChooseFiles != nil {
 						iconAction(c.Key("attach-files"), "Attach files", paperclipIcon, !editable || v.attach.picking != nil).AlignSelf(ui.End).OnClick(func() { v.chooseFiles(services, thread.ID) })
 					}
 					// An agent may advertise more options than fit: they scroll, so the
@@ -937,18 +954,25 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 								status = thread.Status
 							}
 							ui.Spinner(c).Size(13, 13).Label("Agent working").Margin(0, 4, 0, 8)
-							var label ui.Element
-							if agentWorking(thread) {
-								label = shimmerText(c, status, 12, t.TextMuted, t.Text)
-							} else {
-								label = ui.Text(c, status).FontSize(12).TextColor(t.TextMuted)
+							// In a narrow window, a turn's status would wrap the options each
+							// time one starts. The sidebar says it too, and the spinner shows it.
+							if !thread.Running || box.Bounds().W >= 600 {
+								var label ui.Element
+								if agentWorking(thread) {
+									label = shimmerText(c, status, 12, t.TextMuted, t.Text)
+								} else {
+									label = ui.Text(c, status).FontSize(12).TextColor(t.TextMuted)
+								}
+								label.SingleLine().MaxWidth(statusWidth).Margin(0, 6, 0, 0)
 							}
-							label.SingleLine().MaxWidth(statusWidth).Margin(0, 6, 0, 0)
 						}
 						_, waiting := v.queued[thread.ID]
 						switch {
 						case thread.Running:
-							roundButton(c, "Stop", stopIcon, false, false).OnClick(func() { v.app.Stop(thread.ID) })
+							roundButton(c, "Stop", stopIcon, false, false).OnClick(func() {
+								v.app.Stop(thread.ID)
+								v.picker.refocus = true
+							})
 						case waiting:
 							roundButton(c, "Cancel sending", stopIcon, false, false).OnClick(func() { v.unqueue(thread.ID) })
 						default:
@@ -1010,15 +1034,24 @@ func (v *View) inlineOptions(c *ui.Context, thread app.ThreadView) {
 			switch o.Type {
 			case acp.SessionConfigOptionTypeSelect:
 				choices := selectChoices(o)
-				chipSelect(c, o.Name, o.Name, about, selectValue(o), choices, disabled || len(choices) == 0, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.ID), value)) })
+				chipSelect(c, o.Name, o.Name, about, selectValue(o), choices, disabled || len(choices) == 0, func(value string) {
+					v.fail(v.app.SetOption(thread.ID, string(o.ID), value))
+					v.picker.refocus = true
+				})
 			case acp.SessionConfigOptionTypeBoolean:
 				on, _ := o.CurrentValue.(bool)
-				chipSelect(c, o.Name, o.Name, about, booleanValue(on), booleanChoices, disabled, func(value string) { v.fail(v.app.SetOption(thread.ID, string(o.ID), value == booleanValue(true))) })
+				chipSelect(c, o.Name, o.Name, about, booleanValue(on), booleanChoices, disabled, func(value string) {
+					v.fail(v.app.SetOption(thread.ID, string(o.ID), value == booleanValue(true)))
+					v.picker.refocus = true
+				})
 			}
 		})
 	}
 	if len(thread.Session.Options) == 0 && thread.Session.Modes != nil {
-		chipSelect(c.Key("inline-mode"), "Mode", "Mode", "", string(thread.Session.Modes.CurrentModeID), modeChoices(thread.Session.Modes), disabled, func(value string) { v.fail(v.app.SetMode(thread.ID, value)) })
+		chipSelect(c.Key("inline-mode"), "Mode", "Mode", "", string(thread.Session.Modes.CurrentModeID), modeChoices(thread.Session.Modes), disabled, func(value string) {
+			v.fail(v.app.SetMode(thread.ID, value))
+			v.picker.refocus = true
+		})
 	}
 	if thread.Connected && !thread.Configuring && len(thread.Session.Options) == 0 && thread.Session.Modes == nil {
 		ui.Text(c, "No session options").FontSize(12).TextColor(faint(c.Theme())).SingleLine().Padding(3, 7)
@@ -1210,7 +1243,10 @@ func (v *View) permission(c *ui.Context, id string, p app.Permission) {
 					} else {
 						button = ui.Button(c.Key(string(o.OptionID)), o.Name)
 					}
-					button.OnClick(func() { v.app.Answer(id, p.ID, o.OptionID) })
+					button.OnClick(func() {
+						v.app.Answer(id, p.ID, o.OptionID)
+						v.picker.refocus = true
+					})
 				}
 				if len(p.Request.Options) == 0 {
 					ui.Text(c, "The agent offered no options. Stop the turn to cancel.").FontSize(12).TextColor(t.TextMuted)

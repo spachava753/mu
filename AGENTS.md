@@ -48,6 +48,12 @@ Known tech debt, including that SDK gap and what to change once it is fixed, is 
 
 For Mu UI changes, visual regressions, or screenshot/animation QA requests, read and follow [mu-visual-qa](.bb/skills/mu-visual-qa/SKILL.md). Capture with the offline harness and inspect the images; passing tests alone is not visual QA.
 
+**Never change a UI test silently.** The tests in `internal/desktop`, above all the workflows in `workflows_test.go` and the scenarios named in the QA skill, record the behavior and appearance the maintainer wants preserved. A change to one means part of the UI's surface changed, on purpose or not, and the maintainer needs to come and look.
+
+- If one fails during other work, treat it as a regression in the code first. Don't edit the test to make it pass unless the task really does change that behavior.
+- Whenever you modify, weaken, skip or remove one, say so loudly: in its own section at the top of your final message, and in the commit message. Name each test, what it checked before and what it checks now, why it changed, and what a person will see differently. Don't bury this in a summary or leave it to the diff.
+- Mention new tests too, but they don't need this. What matters is any change to what an existing test holds in place, including its helpers and fixtures.
+
 Run `go test -race ./...`, `go vet ./...`, and `go build -o bin/mu .` after meaningful changes. Tests use an offline fixture with its own session store, separate from Mu’s data directory. The old Pi lifecycle QA was removed: pinned pi-acp@0.0.34 lacks required close/fork capabilities. Obtain task-specific authorization before adding or running any real-provider QA, including `TestLivePi` in `internal/desktop`, which drives the Pi installed on the machine against a real model. No provider credentials belong in source, test output, or fixture files.
 
 An installed Mu may be running, and it shares the default data directory and its exclusive lock, so plain `go run .` can refuse to start. Run development copies with `go run . --data-dir "$PWD/.qa/dev"`, and don't stop the installed Mu to make room.

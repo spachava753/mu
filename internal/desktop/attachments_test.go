@@ -276,14 +276,177 @@ func TestSameNameTwiceStaysTwoFiles(t *testing.T) {
 	}
 }
 
-func TestAttachButtonIsAbsentDuringATurn(t *testing.T) {
-	f := newAttachFixture(t, 800, 600)
+// Files can be got ready for the next message while a turn runs. They wait for it.
+func TestAttachingDuringATurn(t *testing.T) {
+	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			f := newAttachFixture(t, size[0], size[1])
+			optionsBefore, ok := f.tt.Find("Session options")
+			if !ok {
+				t.Fatal("no session options")
+			}
+			f.tt.Type("wait")
+			f.tt.Frame()
+			f.tt.Key(0, ui.KeyEnter)
+			waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return s.Threads[0].Running })
+			f.tt.Frame()
+			// Starting the turn doesn't wrap the options and push the draft up.
+			if options, ok := f.tt.Find("Session options"); !ok || options.H != optionsBefore.H {
+				t.Fatalf("options went from %+v to %+v", optionsBefore, options)
+			}
+
+			paper, other := f.file(t, "paper.pdf", []byte("%PDF\x00")), f.file(t, "other.pdf", []byte("%PDF\x00"))
+			click(t, f.tt, "Attach files")
+			f.picks <- []string{paper}
+			f.settle(t, "the chosen file", func() bool {
+				_, ok := f.tt.Find("Attached file: paper.pdf")
+				return ok && !f.tt.HasText("Reading…")
+			})
+			f.drop(t, other)
+			f.settle(t, "the dropped file", func() bool {
+				_, ok := f.tt.Find("Attached file: other.pdf")
+				return ok && !f.tt.HasText("Reading…")
+			})
+			screenshot(t, f.tt, fmt.Sprintf("attachments-during-turn-%d", size[0]))
+			click(t, f.tt, "Remove other.pdf")
+			if _, ok := f.tt.Find("Attached file: other.pdf"); ok {
+				t.Fatal("couldn't remove a file during the turn")
+			}
+			if !f.a.Snapshot().Threads[0].Running || len(f.a.Snapshot().Threads[0].Entries) != 2 {
+				t.Fatalf("attaching touched the turn: %+v", f.a.Snapshot().Threads[0].Entries)
+			}
+
+			click(t, f.tt, "Stop")
+			waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running })
+			if _, ok := f.tt.Find("Attached file: paper.pdf"); !ok {
+				t.Fatal("the file didn't wait for the next message")
+			}
+			click(t, f.tt, "Send")
+			waitView(t, f.a, f.tt, func(s app.Snapshot) bool {
+				return !s.Threads[0].Running && len(s.Threads[0].Entries) > 3
+			})
+			if got := strings.Join(f.sentBlocks(t), ""); got != "<resource>" {
+				t.Fatalf("sent %q", got)
+			}
+		})
+	}
+}
+
+// The next message can be written while a turn runs: only sending has to wait.
+func TestComposingDuringATurn(t *testing.T) {
+	for _, size := range [][2]int{{800, 600}, {1100, 780}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			f := newAttachFixture(t, size[0], size[1])
+			f.tt.Type("wait")
+			f.tt.Frame()
+			f.tt.Key(0, ui.KeyEnter)
+			waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return s.Threads[0].Running })
+			// Sending leaves the focus in the draft, ready for the next one.
+			if !f.tt.Focused("Message") {
+				t.Fatal("the draft lost the focus")
+			}
+			f.tt.Type("next")
+			f.tt.Frame()
+			f.tt.Key(ui.Shift, ui.KeyEnter)
+			f.tt.Type("prompt")
+			f.tt.Frame()
+			f.tt.SetClipboard(" pasted")
+			f.tt.Key(ui.Cmd, ui.KeyV)
+			f.tt.Frame()
+			if got, want := f.draft(), "next\nprompt pasted"; got != want {
+				t.Fatalf("draft %q, want %q", got, want)
+			}
+			paper := f.file(t, "paper.pdf", []byte("%PDF\x00"))
+			f.drop(t, paper)
+			f.settle(t, "the file", func() bool { return !f.tt.HasText("Reading…") })
+			screenshot(t, f.tt, fmt.Sprintf("composing-during-turn-%d", size[0]))
+
+			// Enter does nothing yet: it neither sends nor breaks the line.
+			f.tt.Key(0, ui.KeyEnter)
+			f.tt.Frame()
+			if got, want := f.draft(), "next\nprompt pasted"; got != want {
+				t.Fatalf("after Enter, draft %q, want %q", got, want)
+			}
+			if n := len(f.a.Snapshot().Threads[0].Entries); n != 2 {
+				t.Fatalf("sent during the turn: %d entries", n)
+			}
+			if _, ok := f.tt.Find("Send"); ok {
+				t.Fatal("offered Send during the turn")
+			}
+
+			click(t, f.tt, "Stop")
+			waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running })
+			if got, want := f.draft(), "next\nprompt pasted"; got != want {
+				t.Fatalf("after stopping, draft %q, want %q", got, want)
+			}
+			if !f.tt.Focused("Message") {
+				t.Fatal("stopping left the draft without the focus")
+			}
+			f.tt.Key(0, ui.KeyEnter)
+			waitView(t, f.a, f.tt, func(s app.Snapshot) bool {
+				return !s.Threads[0].Running && len(s.Threads[0].Entries) > 3
+			})
+			if got := strings.Join(f.sentBlocks(t), ""); got != "next\nprompt pasted<resource>" {
+				t.Fatalf("sent %q", got)
+			}
+			if f.draft() != "" {
+				t.Fatalf("draft after sending: %q", f.draft())
+			}
+		})
+	}
+}
+
+// A turn that ends by itself, here once its permission is answered, leaves the draft.
+func TestDraftWrittenDuringATurnSendsWhenItEnds(t *testing.T) {
+	f := newAttachFixture(t, 1100, 780)
+	f.tt.Type("permission")
+	f.tt.Frame()
+	f.tt.Key(0, ui.KeyEnter)
+	waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return len(s.Threads[0].Permissions) == 1 })
+	f.tt.Type("next")
+	f.tt.Frame()
+	f.tt.Key(0, ui.KeyEnter)
+	f.tt.Frame()
+	if !f.a.Snapshot().Threads[0].Running || f.draft() != "next" {
+		t.Fatalf("running %v, draft %q", f.a.Snapshot().Threads[0].Running, f.draft())
+	}
+	click(t, f.tt, "Allow once")
+	waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return !s.Threads[0].Running })
+	if got := f.draft(); got != "next" {
+		t.Fatalf("draft %q", got)
+	}
+	if !f.tt.Focused("Message") {
+		t.Fatal("answering left the draft without the focus")
+	}
+	f.tt.Key(0, ui.KeyEnter)
+	waitView(t, f.a, f.tt, func(s app.Snapshot) bool {
+		e := s.Threads[0].Entries
+		return !s.Threads[0].Running && len(e) > 0 && e[len(e)-1].Text == "Echo: next"
+	})
+	if got := strings.Join(f.sentBlocks(t), ""); got != "next" {
+		t.Fatalf("sent %q", got)
+	}
+}
+
+// Slash commands can be completed during a turn. Enter still only completes.
+func TestSlashCommandsDuringATurn(t *testing.T) {
+	f := newAttachFixture(t, 1100, 780)
 	f.tt.Type("wait")
 	f.tt.Frame()
 	f.tt.Key(0, ui.KeyEnter)
 	waitView(t, f.a, f.tt, func(s app.Snapshot) bool { return s.Threads[0].Running })
-	if _, ok := f.tt.Find("Attach files"); ok {
-		t.Fatal("offered during a turn")
+	f.tt.Type("/rev")
+	f.tt.Frame()
+	if !f.tt.HasText("/review") {
+		t.Fatalf("no picker: %q", f.tt.Texts())
+	}
+	f.tt.Key(0, ui.KeyEnter)
+	f.tt.Frame()
+	if got := f.draft(); got != "/review " {
+		t.Fatalf("draft %q", got)
+	}
+	if n := len(f.a.Snapshot().Threads[0].Entries); n != 2 {
+		t.Fatalf("sent during the turn: %d entries", n)
 	}
 }
 

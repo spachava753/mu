@@ -229,6 +229,15 @@ func main() {
 			if slices.Contains(os.Args, "wait-fork") {
 				continue
 			}
+			if slices.Contains(os.Args, "gate-fork") {
+				// Hold the fork until the test creates this file.
+				for {
+					if _, err := os.Stat(filepath.Join(storeDir(), "release")); err == nil {
+						break
+					}
+					time.Sleep(2 * time.Millisecond)
+				}
+			}
 			if s == nil {
 				notOpen(m.ID, p.SessionID)
 				continue

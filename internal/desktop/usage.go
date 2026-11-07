@@ -46,7 +46,10 @@ func (v *View) usageLine(c *ui.Context, thread app.ThreadView, hint bool) {
 			ui.Text(c, fmt.Sprintf("Cost %s %.4f", u.Cost.Currency, u.Cost.Amount)).FontSize(12).TextColor(faint(t)).SingleLine().Shrink(0)
 		}
 		ui.Spacer(c)
-		if hint {
+		// Says why Enter does nothing during a turn, whatever the width.
+		if thread.Running {
+			ui.Text(c, "Send when this turn ends").FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
+		} else if hint {
 			ui.Text(c, "Enter to send · Shift+Enter for a new line").FontSize(12).TextColor(faint(t)).SingleLine().Shrink(1).MinWidth(0)
 		}
 		ui.PopoverBase(c, indicator, &v.usageOpen, func(panel ui.Element) {

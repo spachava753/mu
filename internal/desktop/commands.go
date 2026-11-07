@@ -50,7 +50,7 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 		*v.draft(t.ID) = queued // What shows is what will go out.
 	}
 	services := c.Services()
-	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).Disabled(t.Running).ReadOnly(waiting).OnPaste(func(text string) bool {
+	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).ReadOnly(waiting).OnPaste(func(text string) bool {
 		if _, waiting := v.queued[t.ID]; waiting {
 			return false
 		}
@@ -89,29 +89,36 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 				}
 			}
 		}
-		if k.Key == ui.KeyEnter && k.Mods == 0 && !t.Running {
+		if k.Key == ui.KeyEnter && k.Mods == 0 {
+			// As it is now: a turn can start or end after this was drawn.
+			now, found := v.threadNow(t.ID)
+			if !found || now.Running {
+				return true // The next message can be written, but goes only after this turn.
+			}
 			if v.stillReading(t.ID) {
 				return true // It goes once its files are read: Enter again.
 			}
 			switch {
-			case !t.Configuring:
+			case !now.Configuring:
 				if v.send(t.ID, k.Text()) {
 					k.SetText("")
 				}
-			case !t.Connected:
+			case !now.Connected:
 				v.queue(t.ID, k.Text())
 			}
 			return true
 		}
 		return false
 	})
-	if p.refocus {
+	// A dialog keeps the keyboard, as a fork can finish while one is open. The draft
+	// gets it when the dialog closes.
+	if p.refocus && !v.dialogOpen() {
 		input.Focus().SetTextSelection(utf8.RuneCountInString(*v.draft(t.ID)), utf8.RuneCountInString(*v.draft(t.ID)))
 		p.refocus = false
 	}
 	matches := p.matches(*v.draft(t.ID), t.Session.Commands)
 	_, slash := slashQuery(*v.draft(t.ID))
-	p.open = slash && !p.dismissed && !t.Running && !waiting && (input.Focused() || p.open)
+	p.open = slash && !p.dismissed && !waiting && (input.Focused() || p.open)
 	if p.open {
 		v.usageOpen = false
 		if !t.Connected && !t.Configuring && !p.attemptedConnection {
