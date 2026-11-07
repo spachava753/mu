@@ -87,9 +87,12 @@ func (s *session) replayMessage(index int, m message) {
 	id := func(part int) *acp.MessageId { return messageID(fmt.Sprintf("replay-%d-%d", index, part)) }
 	switch m.Role {
 	case "user":
-		for part, b := range blocks(m.Content) {
+		for _, b := range blocks(m.Content) {
+			if b.Type == "text" && b.Text == "" {
+				continue // A message of only images has this in front of them.
+			}
 			update := acp.UserMessageChunkSessionUpdate(contentFor(b))
-			update.MessageID = id(part)
+			update.MessageID = id(0)
 			s.send(update)
 		}
 	case "assistant":

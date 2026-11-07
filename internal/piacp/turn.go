@@ -11,6 +11,9 @@ import (
 	"github.com/spachava753/acp-sdk/jsonrpc"
 )
 
+// object is a JSON object for Pi.
+type object = map[string]any
+
 // turn is a prompt in progress.
 type turn struct {
 	settled   chan struct{}
@@ -22,28 +25,55 @@ type turn struct {
 	usage     acp.Usage
 }
 
-// promptText turns ACP content into Pi's single message. Only the kinds the
+// promptMessage turns ACP content into Pi's one message and its images, which Pi
+// shows the model after the text, wherever they were among it. Only the kinds the
 // adapter advertises are accepted.
-func promptText(content []acp.ContentBlock) (string, error) {
-	var parts []string
-	for _, b := range content {
-		switch b.Type {
+func promptMessage(content []acp.ContentBlock) (string, []object, error) {
+	var b strings.Builder
+	onLine := func(text string) {
+		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteString(text)
+	}
+	var images []object
+	for _, c := range content {
+		switch c.Type {
 		case acp.ContentBlockTypeText:
-			parts = append(parts, b.Text)
+			b.WriteString(c.Text)
+		case acp.ContentBlockTypeImage:
+			image := object{"type": "image", "data": c.Data}
+			if c.MimeType != nil {
+				image["mimeType"] = *c.MimeType
+			}
+			images = append(images, image)
 		case acp.ContentBlockTypeResourceLink:
-			if b.URI != nil {
-				parts = append(parts, *b.URI)
+			if c.URI != nil {
+				onLine(*c.URI)
 			}
 		case acp.ContentBlockTypeResource:
-			if b.Resource.Text == nil {
-				return "", invalidParams("binary resources aren't supported")
+			if c.Resource.Text == nil {
+				return "", nil, invalidParams("Pi can't take %s: only text and images reach its model", describeUnsupported(c))
 			}
-			parts = append(parts, *b.Resource.Text)
+			// The model gets to know what it's reading.
+			onLine(c.Resource.URI + ":\n" + *c.Resource.Text)
 		default:
-			return "", invalidParams("%s content isn't supported", b.Type)
+			return "", nil, invalidParams("Pi can't take %s: only text and images reach its model", describeUnsupported(c))
 		}
 	}
-	return strings.Join(parts, "\n"), nil
+	return b.String(), images, nil
+}
+
+// describeUnsupported names content Pi has no way to receive.
+func describeUnsupported(c acp.ContentBlock) string {
+	if c.Type == acp.ContentBlockTypeResource {
+		kind := "a binary file"
+		if c.Resource.MimeType != nil {
+			kind = "a " + *c.Resource.MimeType + " file"
+		}
+		return kind
+	}
+	return string(c.Type)
 }
 
 func (s *session) beginTurn() (*turn, error) {
@@ -74,7 +104,7 @@ func compactRequest(text string) (instructions string, ok bool) {
 }
 
 func (s *session) prompt(ctx context.Context, content []acp.ContentBlock) (*acp.PromptResponse, error) {
-	text, err := promptText(content)
+	text, images, err := promptMessage(content)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +114,9 @@ func (s *session) prompt(ctx context.Context, content []acp.ContentBlock) (*acp.
 	}
 	defer s.endTurn()
 	if instructions, ok := compactRequest(text); ok {
+		if len(images) > 0 {
+			return nil, invalidParams("/compact can't take images. Send it without them")
+		}
 		return s.compact(ctx, t, instructions)
 	}
 	// An extension's command answers only after its dialogs do, so this has no
@@ -91,7 +124,11 @@ func (s *session) prompt(ctx context.Context, content []acp.ContentBlock) (*acp.
 	var accepted struct {
 		Disposition string `json:"disposition"`
 	}
-	err = s.pi.call(ctx, "prompt", map[string]any{"message": text}, &accepted)
+	fields := map[string]any{"message": text}
+	if len(images) > 0 {
+		fields["images"] = images
+	}
+	err = s.pi.call(ctx, "prompt", fields, &accepted)
 	var refused *rejected
 	switch {
 	case errors.As(err, &refused):

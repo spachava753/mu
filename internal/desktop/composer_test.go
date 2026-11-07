@@ -17,6 +17,13 @@ import (
 	"github.com/spachava753/mu/internal/testutil"
 )
 
+// composerView is the view with what main.go gives it for the composer.
+func composerView(a *app.App) *desktop.View {
+	v := desktop.New(a, "")
+	v.ChooseFiles = func() ([]string, error) { return nil, nil }
+	return v
+}
+
 func composerFixture(t *testing.T, width, height int) (*app.App, *ui.Tester) {
 	t.Helper()
 	a := testApp(t)
@@ -24,8 +31,7 @@ func composerFixture(t *testing.T, width, height int) (*app.App, *ui.Tester) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := desktop.New(a, "")
-	tt := ui.NewTester(v.Draw, width, height)
+	tt := ui.NewTester(composerView(a).Draw, width, height)
 	tt.SetDark(true)
 	return a, tt
 }
@@ -257,7 +263,7 @@ func TestOpeningThreadConnects(t *testing.T) {
 	if err := a.Archive(archived, true); err != nil {
 		t.Fatal(err)
 	}
-	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt := ui.NewTester(composerView(a).Draw, 800, 600)
 	tt.Frame()
 	// The newest active thread opens at startup, and only that one connects.
 	waitView(t, a, tt, func(s app.Snapshot) bool {
@@ -290,7 +296,7 @@ func TestConnectingNewThreadSaysStarting(t *testing.T) {
 	if _, err := a.Create(fmt.Sprintf("%q session-ui slow-init slow-new", testutil.Agent(t)), ""); err != nil {
 		t.Fatal(err)
 	}
-	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt := ui.NewTester(composerView(a).Draw, 800, 600)
 	tt.Frame()
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Configuring })
 	got := 0
@@ -328,7 +334,7 @@ func TestEnterWhileConnectingSendsWhenReady(t *testing.T) {
 		if _, err := a.Create(fmt.Sprintf("%q gate %s", command, args), ""); err != nil {
 			t.Fatal(err)
 		}
-		tt = ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+		tt = ui.NewTester(composerView(a).Draw, 800, 600)
 		tt.Frame()
 		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Configuring })
 		return a, tt, release
@@ -460,7 +466,7 @@ func TestFailedConnectionOffersRetry(t *testing.T) {
 	if _, err := a.Create("mu-test-no-such-agent", ""); err != nil {
 		t.Fatal(err)
 	}
-	tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+	tt := ui.NewTester(composerView(a).Draw, 800, 600)
 	tt.Frame()
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].SessionError != "" && !s.Threads[0].Configuring })
 	first := a.Snapshot().Threads[0].SessionError
@@ -515,7 +521,7 @@ func TestManyOptionsStayReachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	const height = 600
-	tt := ui.NewTester(desktop.New(a, "").Draw, 800, height)
+	tt := ui.NewTester(composerView(a).Draw, 800, height)
 	tt.Frame()
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 	for _, label := range []string{"Message", "Send", "Context usage"} {
@@ -555,7 +561,7 @@ func TestComposerKeepsRoomWithPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	const height = 600
-	tt := ui.NewTester(desktop.New(a, "").Draw, 800, height)
+	tt := ui.NewTester(composerView(a).Draw, 800, height)
 	tt.Frame()
 	waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].Connected && !s.Threads[0].Configuring })
 	send := func(prompt string) {
@@ -611,7 +617,7 @@ func TestGitLine(t *testing.T) {
 				t.Fatal(err)
 			}
 			dir := a.Snapshot().Threads[0].Cwd
-			tt := ui.NewTester(desktop.New(a, "").Draw, size[0], size[1])
+			tt := ui.NewTester(composerView(a).Draw, size[0], size[1])
 			tt.Frame()
 			if _, ok := tt.Find("Git branch: feature/resize"); ok {
 				t.Fatal("git line outside a repository")
@@ -683,7 +689,7 @@ func TestPullRequestLine(t *testing.T) {
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("%v: %s", err, out)
 			}
-			tt2 := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+			tt2 := ui.NewTester(composerView(a).Draw, 800, 600)
 			tt2.Frame()
 			waitView(t, a, tt2, func(s app.Snapshot) bool { return s.Threads[0].PullRequest.Found() })
 			if !tt2.HasText(tt.want) || !tt2.HasText("feature/resize") {
@@ -712,7 +718,7 @@ func TestPullRequestOpens(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
-		tt := ui.NewTester(desktop.New(a, "").Draw, 800, 600)
+		tt := ui.NewTester(composerView(a).Draw, 800, 600)
 		tt.Frame()
 		waitView(t, a, tt, func(s app.Snapshot) bool { return s.Threads[0].PullRequest.Found() })
 		return a, tt

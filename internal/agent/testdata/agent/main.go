@@ -36,6 +36,15 @@ func reply(id json.RawMessage, result any) {
 func update(session, kind, text string) {
 	send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session, "update": map[string]any{"sessionUpdate": kind, "content": map[string]any{"type": "text", "text": text}}}})
 }
+
+// echoBlock tells the client about a block of the user's prompt, as agents may.
+func echoBlock(session string, block json.RawMessage, messageID string) {
+	update := map[string]any{"sessionUpdate": "user_message_chunk", "content": block}
+	if messageID != "" {
+		update["messageId"] = messageID
+	}
+	send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session, "update": update}})
+}
 func finish(s *openSession, reason string) {
 	s.recording = false
 	if s.pending != nil {
@@ -109,9 +118,7 @@ func main() {
 					} `json:"configOptions"`
 				} `json:"session"`
 			} `json:"clientCapabilities"`
-			Prompt []struct {
-				Text string `json:"text"`
-			} `json:"prompt"`
+			Prompt []json.RawMessage `json:"prompt"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		s := open[p.SessionID]
@@ -299,15 +306,40 @@ func main() {
 			notify(s.ID, map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": s.mode})
 			reply(m.ID, map[string]any{})
 		case "session/prompt":
-			text := ""
-			for _, b := range p.Prompt {
+			text, hasFiles := "", false
+			for _, raw := range p.Prompt {
+				var b struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}
+				_ = json.Unmarshal(raw, &b)
 				text += b.Text
+				hasFiles = hasFiles || b.Type != "text"
 			}
 			if s == nil {
 				missing(m.ID)
 				continue
 			}
-			savePrompt(s.savedSession, text)
+			if hasFiles {
+				saveBlocks(s.savedSession, p.Prompt)
+				if slices.Contains(os.Args, "echo-files") {
+					for _, raw := range p.Prompt {
+						echoBlock(s.ID, raw, "")
+					}
+				}
+				if slices.Contains(os.Args, "echo-files-ids") {
+					for _, raw := range p.Prompt {
+						echoBlock(s.ID, raw, "echoed-prompt")
+					}
+				}
+				if slices.Contains(os.Args, "refuse-files") {
+					s.recording, s.pending = false, nil
+					send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32602, "message": "this model cannot take that file"}})
+					continue
+				}
+			} else {
+				savePrompt(s.savedSession, text)
+			}
 			s.recording, s.pending = true, m.ID
 			session := s.ID
 			switch text {

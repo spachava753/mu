@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/spachava753/acp-sdk/acp"
+	"github.com/spachava753/mu/internal/media"
 	"github.com/spachava753/mu/internal/textdiff"
 )
 
@@ -30,6 +33,43 @@ type Entry struct {
 	Input string `json:"-"`
 	// Diffs are computed once when a tool call changes, and shared by snapshots.
 	Diffs []textdiff.File `json:"-"`
+	// Parts is a user message with files in it, in order; Text is then only a
+	// readable account of it. Snapshots share it, so it's replaced, never changed.
+	Parts []Part `json:"-"`
+}
+
+// Part is a piece of a message: text, or with File set, a file.
+type Part struct {
+	Text string
+	File *media.File
+}
+
+// AddPart returns parts with another after them, in a new slice. Text following
+// text joins it.
+func AddPart(parts []Part, part Part) []Part {
+	if n := len(parts); part.File == nil && n > 0 && parts[n-1].File == nil {
+		parts = slices.Clone(parts)
+		parts[n-1].Text += part.Text
+		return parts
+	}
+	return append(slices.Clip(parts), part)
+}
+
+// PartsText is a message's parts as plain text, with files by name, apart from
+// whatever is just before them.
+func PartsText(parts []Part) string {
+	var b strings.Builder
+	for _, part := range parts {
+		if part.File == nil {
+			b.WriteString(part.Text)
+			continue
+		}
+		if text := b.String(); text != "" && !strings.HasSuffix(text, " ") && !strings.HasSuffix(text, "\n") {
+			b.WriteByte(' ')
+		}
+		b.WriteString(part.File.Name)
+	}
+	return b.String()
 }
 
 type Thread struct {

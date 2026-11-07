@@ -24,6 +24,10 @@ _Avoid_: Workspace, repository
 A checkout of a project's repository, in the sense of `git worktree`, that a thread can work in to have its own files and branch. Git owns it: one made outside Mu is the same as one made in Mu. Deleting one archives its threads and leaves the agent's sessions alone.
 _Avoid_: Environment, sandbox
 
+**Attachment**:
+A file sent with a prompt, after its text. Whether it can be used is for the agent to say.
+_Avoid_: Upload
+
 **Agent connection**:
 One running agent process that serves the sessions of every thread using the same agent configuration, and its discovery. A saved agent's connection stays open while idle.
 _Avoid_: Thread process

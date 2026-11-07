@@ -56,6 +56,9 @@ func run() (err error) {
 		}
 		return paths[0], nil
 	}
+	view.ChooseFiles = func() ([]string, error) {
+		return mygo.Dialog.Open(mygo.OpenDialogOptions{Title: "Attach files", ButtonLabel: "Attach", Multiple: true})
+	}
 	mygo.App.SetName("Mu")
 	mygo.App.WhenReady(func() {
 		w := mygo.NewWindow(mygo.WindowOptions{Title: "Mu", Width: 1100, Height: 780, MinWidth: 800, MinHeight: 600, Content: ui.View(view.Draw)})

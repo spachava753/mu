@@ -141,7 +141,7 @@ func (a *adapter) Initialize(ctx context.Context, _ *acp.InitializeRequest) (*ac
 		AgentInfo:       &acp.Implementation{Name: "pi", Version: version},
 		AgentCapabilities: &acp.AgentCapabilities{
 			LoadSession:        true,
-			PromptCapabilities: &acp.PromptCapabilities{EmbeddedContext: true},
+			PromptCapabilities: &acp.PromptCapabilities{EmbeddedContext: true, Image: true},
 			SessionCapabilities: &acp.SessionCapabilities{
 				List:  &acp.SessionListCapabilities{},
 				Close: &acp.SessionCloseCapabilities{},

@@ -238,7 +238,7 @@ func streamText(index int, text string) {
 	update(object{"type": "text_end", "contentIndex": index, "content": text})
 }
 
-func beginTurn(text string) {
+func beginTurn(text string, images []object) {
 	emit(object{"type": "agent_start"})
 	emit(object{"type": "turn_start"})
 	if turns == 0 {
@@ -247,7 +247,11 @@ func beginTurn(text string) {
 		endMessage(system)
 	}
 	turns++
-	user := object{"role": "user", "content": []object{{"type": "text", "text": text}}, "timestamp": time.Now().UnixMilli()}
+	content := []object{{"type": "text", "text": text}}
+	for _, image := range images {
+		content = append(content, image)
+	}
+	user := object{"role": "user", "content": content, "timestamp": time.Now().UnixMilli()}
 	emit(object{"type": "message_start", "message": user})
 	endMessage(user)
 	emit(object{"type": "message_start", "message": object{"role": "assistant", "content": []object{}, "stopReason": "pending"}})
@@ -304,8 +308,8 @@ func ask(method string, fields object) object {
 }
 
 // runTurn plays out the turn the prompt's text names.
-func runTurn(text string, stop chan struct{}) {
-	beginTurn(text)
+func runTurn(text string, images []object, stop chan struct{}) {
+	beginTurn(text, images)
 	switch {
 	case strings.Contains(text, "exit-now"):
 		os.Exit(3)
@@ -457,17 +461,18 @@ func main() {
 	scanner.Buffer(make([]byte, 4096), 16*1024*1024)
 	for scanner.Scan() {
 		var c struct {
-			ID                 any     `json:"id"`
-			Type               string  `json:"type"`
-			Message            string  `json:"message"`
-			Provider           string  `json:"provider"`
-			ModelID            string  `json:"modelId"`
-			Level              string  `json:"level"`
-			Name               string  `json:"name"`
-			CustomInstructions string  `json:"customInstructions"`
-			Confirmed          *bool   `json:"confirmed"`
-			Cancelled          bool    `json:"cancelled"`
-			Value              *string `json:"value"`
+			ID                 any      `json:"id"`
+			Type               string   `json:"type"`
+			Message            string   `json:"message"`
+			Images             []object `json:"images"`
+			Provider           string   `json:"provider"`
+			ModelID            string   `json:"modelId"`
+			Level              string   `json:"level"`
+			Name               string   `json:"name"`
+			CustomInstructions string   `json:"customInstructions"`
+			Confirmed          *bool    `json:"confirmed"`
+			Cancelled          bool     `json:"cancelled"`
+			Value              *string  `json:"value"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &c) != nil {
 			continue
@@ -584,7 +589,7 @@ func main() {
 			running, settled = stop, make(chan struct{})
 			stateMu.Unlock()
 			respond(c.ID, c.Type, object{"disposition": "started"})
-			go runTurn(c.Message, stop)
+			go runTurn(c.Message, c.Images, stop)
 		}
 	}
 }

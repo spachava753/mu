@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spachava753/acp-sdk/acp"
+	"github.com/spachava753/mu/internal/media"
 	"github.com/spachava753/mu/internal/state"
 	"github.com/spachava753/mu/internal/textdiff"
 )
@@ -245,9 +246,16 @@ func (a *App) updateLocked(id string, r *runtime, n acp.SessionNotification) {
 func messageID(id *acp.MessageId) string { return string(deref(id)) }
 
 // appendChunk groups chunks by the agent's message ID. Agents may omit IDs in
-// ACP v1; only then are adjacent same-role text chunks treated as one message.
+// ACP v1; only then are adjacent same-role text chunks treated as one message, and
+// the files in a user's message go with its text, where they were in it.
 func appendChunk(t *thread, role, id string, block acp.ContentBlock) {
 	text := contentText(block)
+	var file *media.File
+	if role == "user" {
+		if file = media.FromBlock(block); file != nil {
+			text = file.Name
+		}
+	}
 	if text == "" {
 		return
 	}
@@ -259,15 +267,25 @@ func appendChunk(t *thread, role, id string, block acp.ContentBlock) {
 				break
 			}
 		}
-	} else if last := len(t.Entries) - 1; last >= 0 && t.Entries[last].Role == role && t.Entries[last].MessageID == "" && block.Type == acp.ContentBlockTypeText {
+	} else if last := len(t.Entries) - 1; last >= 0 && t.Entries[last].Role == role && t.Entries[last].MessageID == "" && (block.Type == acp.ContentBlockTypeText || role == "user") {
 		i = last
 	}
 	if i < 0 {
 		t.Entries = append(t.Entries, state.Entry{ID: state.ID(), Role: role, MessageID: id})
 		i = len(t.Entries) - 1
 	}
-	t.Entries[i].Text += text
-	if block.Type != acp.ContentBlockTypeText {
+	e := &t.Entries[i]
+	switch {
+	case file != nil:
+		if e.Parts == nil && e.Text != "" {
+			e.Parts = []state.Part{{Text: e.Text}}
+		}
+		e.Parts = state.AddPart(e.Parts, state.Part{File: file})
+	case e.Parts != nil:
+		e.Parts = state.AddPart(e.Parts, state.Part{Text: text})
+	}
+	e.Text += text
+	if file == nil && block.Type != acp.ContentBlockTypeText {
 		t.Entries[i].Details = joinNonEmpty("\n", t.Entries[i].Details, pretty(block))
 	}
 }
@@ -286,21 +304,24 @@ func joinNonEmpty(sep string, values ...string) string {
 // Mu just sent, which is already shown as Mu's local user entry. With message
 // IDs, the first user message of the turn is identified once and the agent's
 // text replaces the local copy if it differs. Without IDs, text that diverges
-// from the prompt is an agent-authored user message and gets its own entry.
+// from the prompt is an agent-authored user message and gets its own entry. The
+// prompt's files are echoed as files, and the local copy already has them.
 func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 	e := &r.echo
-	if r.job == nil || e.target == "" {
+	if r.job == nil || e.local == "" {
 		return false
 	}
+	file := media.FromBlock(block)
 	if id != "" {
 		if e.id == "" && e.text == "" {
-			// Adopt a message as the echo only if its first chunk is text that
-			// starts like the prompt; otherwise it is the agent's own user
-			// message, shown separately. The decision is made once per message.
+			// Adopt a message as the echo only if its first chunk starts like the
+			// prompt: text it starts with, or a file if it has any. Otherwise it
+			// is the agent's own user message, shown separately. The decision is
+			// made once per message.
 			if e.rejected[id] {
 				return false
 			}
-			if block.Type != acp.ContentBlockTypeText || !strings.HasPrefix(e.target, block.Text) {
+			if !startsEcho(e, file, block) {
 				if e.rejected == nil {
 					e.rejected = map[string]bool{}
 				}
@@ -315,16 +336,30 @@ func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 	} else if e.id != "" {
 		return false
 	}
-	if block.Type != acp.ContentBlockTypeText {
-		return false
-	}
-	e.text += block.Text
 	local := entryByID(t, e.local)
+	if file != nil {
+		// Once a message without IDs has diverged, its files are its own.
+		if diverged := id == "" && e.entry != ""; !diverged {
+			if e.files == 0 {
+				return false
+			}
+			e.files--
+		}
+		e.parts = state.AddPart(e.parts, state.Part{File: file})
+	} else if block.Type != acp.ContentBlockTypeText {
+		return false
+	} else {
+		e.text += block.Text
+		e.parts = state.AddPart(e.parts, state.Part{Text: block.Text})
+	}
 	if id != "" {
 		if local != nil {
 			local.MessageID = id
 			if !strings.HasPrefix(e.target, e.text) {
-				local.Text = e.text
+				local.Text = state.PartsText(e.parts)
+				if local.Parts != nil {
+					local.Parts = e.parts
+				}
 			}
 		}
 		return true
@@ -332,13 +367,25 @@ func echoLocked(t *thread, r *runtime, id string, block acp.ContentBlock) bool {
 	if strings.HasPrefix(e.target, e.text) {
 		return true
 	}
-	if divergent := entryByID(t, e.entry); divergent != nil {
-		divergent.Text = e.text
-	} else {
+	divergent := entryByID(t, e.entry)
+	if divergent == nil {
 		e.entry = state.ID()
-		t.Entries = append(t.Entries, state.Entry{ID: e.entry, Role: "user", Text: e.text})
+		t.Entries = append(t.Entries, state.Entry{ID: e.entry, Role: "user"})
+		divergent = &t.Entries[len(t.Entries)-1]
+	}
+	divergent.Text = state.PartsText(e.parts)
+	if slices.ContainsFunc(e.parts, func(p state.Part) bool { return p.File != nil }) {
+		divergent.Parts = e.parts
 	}
 	return true
+}
+
+// startsEcho reports whether a message's first chunk could be the prompt's echo.
+func startsEcho(e *promptEcho, file *media.File, block acp.ContentBlock) bool {
+	if file != nil {
+		return e.files > 0
+	}
+	return block.Type == acp.ContentBlockTypeText && strings.HasPrefix(e.target, block.Text)
 }
 
 func entryByID(t *thread, id string) *state.Entry {

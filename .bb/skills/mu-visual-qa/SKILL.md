@@ -25,6 +25,7 @@ Run commands from the repository root, not this skill directory. Read the releva
 | Connecting a new thread: failure, sending while it starts | `TestFailedConnectionOffersRetry`, `TestEnterWhileConnectingSendsWhenReady` in [composer_test.go](../../../internal/desktop/composer_test.go) | `connection-failed`, `send-when-ready*` |
 | Slash completion and composer focus | `TestSlashCommandPicker` in [composer_test.go](../../../internal/desktop/composer_test.go) | `slash-commands-*` |
 | Add to prompt popup on a reply's selection, and the quote in the draft | `TestAddSelectionToPrompt` in [composer_test.go](../../../internal/desktop/composer_test.go) | `add-to-prompt-*` |
+| Attachments: cards in a draft, many files, a file being read, files in a sent message | `TestAttachmentsFollowTheText`, `TestManyAttachmentsLeaveTheComposerInTheWindow`, `TestSendWaitsForFilesToBeRead` in [attachments_test.go](../../../internal/desktop/attachments_test.go) | `attachments-*` |
 | Discovery and selective import, scrolled list | `TestSelectiveSessionImportUI` in [imports_test.go](../../../internal/desktop/imports_test.go) | `session-import-*`, `session-import-scrolled-*` |
 | Motion, reversal, reduced motion | Tests in [motion_test.go](../../../internal/desktop/motion_test.go) and [disclosure_test.go](../../../internal/desktop/disclosure_test.go) | `TestRecordMotion` writes `mu-motion.gif`; the other tests assert intermediate states |
 
@@ -38,7 +39,7 @@ Use a fresh ignored directory so old images cannot be mistaken for results of a 
 mkdir -p .qa &&
 out="$(mktemp -d "$PWD/.qa/visual-qa-XXXXXX")" &&
 MU_QA_RENDER_DIR="$out" go test ./internal/desktop \
-  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestComposerOffersEveryOption|TestManyOptionsStayReachable|TestComposerKeepsRoomWithPermissions|TestSidebarDrag|TestGitLine|TestPullRequestLine|TestWorktreesUI|TestWorktreeFolderSetting|TestFailedConnectionOffersRetry|TestEnterWhileConnectingSendsWhenReady|TestSlashCommandPicker|TestAddSelectionToPrompt|TestSelectiveSessionImportUI|TestQAConversation)$' \
+  -run '^(TestMatteSidebarAndSessionControls|TestAgentSettingsUI|TestProjectsUI|TestLongModelOptionsScroll|TestComposerOffersEveryOption|TestManyOptionsStayReachable|TestComposerKeepsRoomWithPermissions|TestSidebarDrag|TestGitLine|TestPullRequestLine|TestWorktreesUI|TestWorktreeFolderSetting|TestFailedConnectionOffersRetry|TestEnterWhileConnectingSendsWhenReady|TestSlashCommandPicker|TestAddSelectionToPrompt|TestAttachmentsFollowTheText|TestManyAttachmentsLeaveTheComposerInTheWindow|TestSendWaitsForFilesToBeRead|TestSelectiveSessionImportUI|TestQAConversation)$' \
   -count=1 -v -timeout 120s &&
 printf 'Screenshots: %s\n' "$out"
 ```

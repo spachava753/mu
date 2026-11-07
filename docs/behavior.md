@@ -2,7 +2,7 @@
 
 What Mu does and deliberately does not do. Terms are defined in [GLOSSARY.md](../GLOSSARY.md).
 
-This is intentionally a single-window, text-chat client. Configure authentication and startup settings with the agent's own CLI. Model and other session controls appear only when the agent exposes them over ACP; Mu supplies no model catalog or provider defaults. It does not provide remote ACP transports, attachment input, or MCP configuration.
+This is intentionally a single-window chat client. Configure authentication and startup settings with the agent's own CLI. Model and other session controls appear only when the agent exposes them over ACP; Mu supplies no model catalog or provider defaults. It does not provide remote ACP transports or MCP configuration.
 
 ## Getting started
 
@@ -82,7 +82,17 @@ Long model/option lists scroll within a bounded menu rather than extending past 
 
 Drag the sidebar's edge to resize it, up to half the window; its width is saved. Dragging it narrow past its minimum snaps it to the collapsed rail with a spring, and dragging the rail's edge brings it back. The collapse button animates over 220 ms, highlights fade over 120 ms, and menus/dialogs/screens enter and leave over 160 ms. Disclosures expand smoothly, context bars ease toward new reported usage, and an activity spinner identifies an outstanding request. While an agent works, its status text in the sidebar and composer shimmers. Streamed text is not delayed for a typewriter effect. Motion respects the desktop's reduced-motion preference.
 
-Session updates are processed while idle as well as during prompts. Mu handles user/assistant/thought chunks, grouped into messages by the agent's message IDs when it sends them (otherwise adjacent chunks of the same kind form one message); tool calls and their partial updates, which change only the fields they include; legacy and ID-addressed plans/removals, available commands, current modes, configuration changes, session info, and usage updates exposed by the ACP SDK. Non-text content is retained with a readable placeholder and inspectable protocol details. Setup notifications are buffered; a successful `session/load` replaces the in-memory conversation with the replay, and session options or modes in the load response take precedence over older values replayed before it. A failed load leaves the old view unchanged and displays an error, rather than exposing a partial replay as complete history. Unsupported experimental capabilities, such as compaction, are not advertised.
+Session updates are processed while idle as well as during prompts. Mu handles user/assistant/thought chunks, grouped into messages by the agent's message IDs when it sends them (otherwise adjacent chunks of the same kind form one message); tool calls and their partial updates, which change only the fields they include; legacy and ID-addressed plans/removals, available commands, current modes, configuration changes, session info, and usage updates exposed by the ACP SDK. Files in a user's message are shown as files, where they were in it. Other non-text content is retained with a readable placeholder and inspectable protocol details. Setup notifications are buffered; a successful `session/load` replaces the in-memory conversation with the replay, and session options or modes in the load response take precedence over older values replayed before it. A failed load leaves the old view unchanged and displays an error, rather than exposing a partial replay as complete history. Unsupported experimental capabilities, such as compaction, are not advertised.
+
+## Attachments
+
+Attach images, PDFs, audio, video or any other file with the paperclip beside the session options, by dropping files on the composer, or by pasting files or an image. A card below the draft shows each file, with a thumbnail for an image and a button to remove it. The files go after the draft's text, in the order you attached them, and a message can be files alone. Text pasted beside a picture of it, as from a spreadsheet, pastes as text.
+
+Files are read when attached, off the UI thread, so later changes to a file aren't sent and an unreadable one is reported at once and left out. **Send** waits until they have been read. The draft's files stay with it when you switch threads, but aren't saved across app restarts.
+
+Mu sends each file as ACP content: images as image blocks, audio as audio blocks, UTF-8 text and anything else, such as PDFs and video, as embedded resources. A file over 100 MB goes as a link to it instead, which its card says, so the agent reads it itself; Mu doesn't hold it in memory. A pasted image has no file to link to, so one that large is refused, with a message. Mu doesn't check a file against the agent's advertised prompt capabilities or the model's abilities: **whether a file can be used is for the agent to say**. An agent's refusal appears in the thread as an agent error, and the session goes on. Some agents may ignore content they don't support without saying so; Mu can't tell.
+
+In the transcript a sent message shows its text and files in order, with images up to 320×240. After a reload, the agent's replay decides what's shown, in its order and under the names it gives: an agent that doesn't report a file's name shows it as **Image** or **File**.
 
 ## Permission requests
 
@@ -96,6 +106,7 @@ Mu includes an ACP adapter for [Pi](https://pi.dev), so nothing else is needed b
 
 Mu doesn't install Pi or sign in for you. Sign in with Pi itself: run `pi` in a terminal, then `/login`. Without a provider, a thread opens and its history loads, but offers no model and can't send.
 
+- **Attachments.** Pi takes text and images, and has no way to receive audio, PDFs, video or other binary files: a prompt with one fails with an error saying so, without reaching the model. `/compact` with images fails the same way. A file over 100 MB goes as its path, for Pi's tools to read. A model that can't take images is Pi's to report.
 - **Project trust.** Pi's RPC mode can't show its trust prompt, and Mu doesn't approve anything on your behalf. In a folder you haven't trusted, Pi silently skips the folder's `.pi` settings, prompts, skills and extensions, so they won't be available in Mu. `AGENTS.md` and `CLAUDE.md` still load. To use them, run `/trust` in Pi in that folder, or set `defaultProjectTrust` in Pi's settings.
 - **File changes.** Pi's edit and write tools report ACP diffs, which appear as a collapsible diff on the tool call. A write doesn't say what it replaced, so all of its text reads as added.
 - **Tool use.** Pi doesn't ask before every tool call, so expect few permission requests. They come only from Pi extensions: a `confirm` or `select` becomes a permission card. An extension's request for text has no equivalent in Mu and is declined.

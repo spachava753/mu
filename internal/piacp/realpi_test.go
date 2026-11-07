@@ -25,6 +25,7 @@ func TestRealPi(t *testing.T) {
 		t.Skip("set MU_TEST_REAL_PI to a Pi executable")
 	}
 	var requests atomic.Int64
+	var lastContent atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusNotFound)
@@ -39,6 +40,9 @@ func TestRealPi(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		last := body.Messages[len(body.Messages)-1]
+		if sent, err := json.Marshal(last.Content); err == nil {
+			lastContent.Store(string(sent))
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunk := func(delta map[string]any, finish any) {
 			data, _ := json.Marshal(map[string]any{"id": "fake", "object": "chat.completion.chunk", "created": 1, "model": "fake", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
@@ -82,7 +86,7 @@ func TestRealPi(t *testing.T) {
 		"baseUrl": server.URL + "/v1", "api": "openai-completions", "apiKey": "not-a-real-key",
 		"models": []any{
 			map[string]any{"id": "basic", "name": "Fake Basic", "reasoning": false, "input": []string{"text"}, "contextWindow": 100000, "maxTokens": 4096, "cost": map[string]any{"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}},
-			map[string]any{"id": "deep", "name": "Fake Deep", "reasoning": true, "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 4096, "cost": map[string]any{"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}},
+			map[string]any{"id": "deep", "name": "Fake Deep", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 200000, "maxTokens": 4096, "cost": map[string]any{"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}},
 		},
 	}}})
 	settings, _ := json.Marshal(map[string]any{"defaultProvider": "fake", "defaultModel": "basic"})
@@ -134,6 +138,18 @@ func TestRealPi(t *testing.T) {
 	}
 	if got := c.text(id, acp.SessionUpdateTypeAgentMessageChunk); got != "Hello from the fake model." {
 		t.Fatalf("reply %q", got)
+	}
+
+	// Images reach the model, after the text.
+	pixel := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg=="
+	if _, err := c.promptBlocks(id,
+		acp.TextContentBlock("compare these"), acp.ImageContentBlock(pixel, "image/png"), acp.ImageContentBlock(pixel, "image/png"),
+	); err != nil {
+		t.Fatal(c.p.Error(err))
+	}
+	sent, _ := lastContent.Load().(string)
+	if !strings.Contains(sent, "compare these") || strings.Index(sent, "compare these") > strings.Index(sent, pixel) || strings.Count(sent, pixel) != 2 {
+		t.Fatalf("the model was sent %s", sent)
 	}
 
 	c.reset()
@@ -224,6 +240,19 @@ func TestRealPi(t *testing.T) {
 	}
 	if got := c.text(id, acp.SessionUpdateTypeUserMessageChunk); !strings.Contains(got, "hello") {
 		t.Fatalf("replayed user text %q", got)
+	}
+	var replayed []string
+	for _, u := range c.received(id) {
+		if b, ok := u.Content.(acp.ContentBlock); ok && u.SessionUpdate == acp.SessionUpdateTypeUserMessageChunk {
+			if b.Type == acp.ContentBlockTypeImage {
+				replayed = append(replayed, "<image>")
+			} else {
+				replayed = append(replayed, b.Text)
+			}
+		}
+	}
+	if !strings.Contains(strings.Join(replayed, ""), "compare these<image><image>") {
+		t.Fatalf("replayed %q", replayed)
 	}
 	if got := c.text(id, acp.SessionUpdateTypeAgentMessageChunk); !strings.Contains(got, "Hello from the fake model.") {
 		t.Fatalf("replayed reply %q", got)

@@ -111,6 +111,15 @@ func savePrompt(active *savedSession, text string) {
 	active.Updates = append(active.Updates, b)
 	save(active)
 }
+
+// saveBlocks keeps a prompt with files in it, for replaying as sent.
+func saveBlocks(active *savedSession, blocks []json.RawMessage) {
+	for _, block := range blocks {
+		b, _ := json.Marshal(map[string]any{"sessionUpdate": "user_message_chunk", "content": block})
+		active.Updates = append(active.Updates, b)
+	}
+	save(active)
+}
 func replay(s *savedSession) {
 	for _, u := range s.Updates {
 		send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": s.ID, "update": u}})

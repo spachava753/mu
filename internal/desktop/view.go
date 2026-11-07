@@ -49,6 +49,7 @@ type View struct {
 	removeAgent                          bool
 	err                                  string
 	drafts                               map[string]*string
+	attach                               attachments
 	lists                                map[string]*ui.ListState
 	expanded                             map[string]*bool
 	md                                   markdown.Options
@@ -56,6 +57,10 @@ type View struct {
 	// or "" if cancelled. It blocks, so the view calls it off the UI thread.
 	// Without it, a folder can still be typed.
 	ChooseFolder func() (string, error)
+	// ChooseFiles shows the native file picker and returns the chosen paths, or
+	// none if cancelled. It blocks, so the view calls it off the UI thread.
+	// Without it, files can still be dropped or pasted.
+	ChooseFiles func() ([]string, error)
 }
 
 func New(a *app.App, command string) *View {
@@ -64,7 +69,7 @@ func New(a *app.App, command string) *View {
 	if command == "" {
 		command = s.LastCommand
 	}
-	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, builtins: newBuiltinEditor(), drafts: map[string]*string{}, queued: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
+	v := &View{app: a, command: command, agentID: s.DefaultAgentID, customCommand: custom, builtins: newBuiltinEditor(), drafts: map[string]*string{}, attach: newAttachments(), queued: map[string]string{}, lists: map[string]*ui.ListState{}, expanded: map[string]*bool{}}
 	v.builtins.load(s.Builtins) // Check again works from more than Settings, and saves this.
 	for _, t := range s.Threads {
 		if !t.Archived {
@@ -137,11 +142,15 @@ func (v *View) disclosure(key string) *bool {
 	return v.expanded[key]
 }
 func (v *View) send(id, text string) bool {
-	if err := v.app.Send(id, text); err != nil {
+	if v.stillReading(id) {
+		return false
+	}
+	if err := v.app.SendParts(id, draftParts(text, v.attach.files[id])); err != nil {
 		v.fail(err)
 		return false
 	}
 	*v.draft(id), v.err = "", ""
+	v.attach.forget(id)
 	if list := v.lists[id]; list != nil {
 		list.ScrollToEnd()
 	}
@@ -151,7 +160,7 @@ func (v *View) send(id, text string) bool {
 // queue sends a message as soon as the thread's session is connected. The draft
 // shows it, read-only, until then, so what goes out is what the user saw.
 func (v *View) queue(id, text string) {
-	if strings.TrimSpace(text) != "" {
+	if strings.TrimSpace(text) != "" || len(v.attach.files[id]) > 0 {
 		v.queued[id] = text
 	}
 }
@@ -232,6 +241,7 @@ func (v *View) removeThreads() {
 			v.selected = ""
 		}
 		delete(v.drafts, id)
+		v.attach.forget(id)
 		delete(v.lists, id)
 	}
 	v.finishBulk(result)
@@ -279,6 +289,7 @@ func (v *View) Draw(c *ui.Context) {
 		default:
 		}
 	}
+	v.collectAttachments(c.Services())
 	v.sendQueued()
 	if v.focused != v.selected {
 		v.focused = v.selected
@@ -368,6 +379,7 @@ func (v *View) Draw(c *ui.Context) {
 	v.worktreesDialog(c, s)
 	v.deleteWorktreeDialog(c, s)
 	v.removeAgentDialog(c)
+	v.trimPreviews()
 }
 
 func (v *View) sidebar(c *ui.Context, s app.Snapshot) {
@@ -895,11 +907,19 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 				return
 			}
 			box := ui.Column(c.Key("composer-box")).Transition(colorMotion).Radius(8).Border(1, hairline(t)).Background(t.Surface)
+			_, sending := v.queued[thread.ID]
+			editable := !thread.Running && !sending
+			services := c.Services()
 			box.Children(func() {
 				if v.messageInput(c, thread, box).Focused() {
 					box.BorderColor(hairline(t).Mix(t.Text, 0.18))
 				}
+				v.attachmentStrip(c, thread.ID, editable)
 				ui.Row(c).Padding(0, 6, 6, 7).Gap(2).Children(func() {
+					// Not during a turn, when it couldn't be used and the status needs the room.
+					if v.ChooseFiles != nil && !thread.Running {
+						iconAction(c.Key("attach-files"), "Attach files", paperclipIcon, !editable || v.attach.picking != nil).AlignSelf(ui.End).OnClick(func() { v.chooseFiles(services, thread.ID) })
+					}
 					// An agent may advertise more options than fit: they scroll, so the
 					// draft and its actions stay in the window. The padding keeps focus
 					// rings clear of the scroll area's clip without moving the chips.
@@ -932,7 +952,7 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 						case waiting:
 							roundButton(c, "Cancel sending", stopIcon, false, false).OnClick(func() { v.unqueue(thread.ID) })
 						default:
-							disabled := strings.TrimSpace(*v.draft(thread.ID)) == "" || (thread.Configuring && thread.Connected)
+							disabled := (strings.TrimSpace(*v.draft(thread.ID)) == "" && len(v.attach.files[thread.ID]) == 0) || (thread.Configuring && thread.Connected) || v.stillReading(thread.ID)
 							roundButton(c, "Send", sendIcon, true, disabled).OnClick(func() {
 								if thread.Configuring {
 									v.queue(thread.ID, *v.draft(thread.ID))
@@ -944,6 +964,12 @@ func (v *View) composer(c *ui.Context, thread app.ThreadView) {
 					})
 				})
 			})
+			if editable {
+				v.attachPaths(services, thread.ID, box.DroppedFiles())
+				if box.FileDragOver() {
+					box.BorderColor(t.Focus)
+				}
+			}
 			// The keyboard hint is the first thing to go in a narrow window.
 			v.usageLine(c, thread, box.Bounds().W >= 600)
 			v.gitLine(c, thread.Git, thread.PullRequest)
@@ -1074,7 +1100,11 @@ func (v *View) entry(c *ui.Context, thread app.ThreadView, e state.Entry) {
 	case "user":
 		ui.Row(c).Justify(ui.End).Children(func() {
 			ui.Column(c).MaxWidthPercent(85).Shrink(1).MinWidth(0).Padding(8, 12).Radius(8).Border(1, hairline(t)).Background(t.Surface).Gap(6).Children(func() {
-				ui.Text(c, e.Text).FontSize(14).LineHeight(1.5).Selectable()
+				if len(e.Parts) > 0 {
+					v.messageParts(c, e.Parts)
+				} else {
+					ui.Text(c, e.Text).FontSize(14).LineHeight(1.5).Selectable()
+				}
 				details()
 			})
 		})

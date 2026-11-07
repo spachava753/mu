@@ -150,11 +150,13 @@ func (r *runtime) live() bool { return r.conn.alive() && r.session != "" }
 
 // promptEcho tracks the agent's account of the prompt Mu sent this turn.
 type promptEcho struct {
-	target string // prompt text Mu sent
-	local  string // entry ID of Mu's local copy of the prompt
-	id     string // agent message ID identified as the echo
-	text   string // echoed text received so far
-	entry  string // separate entry for a divergent echo without message IDs
+	target string       // the text of the prompt Mu sent
+	files  int          // files in the prompt not yet echoed
+	local  string       // entry ID of Mu's local copy of the prompt
+	id     string       // agent message ID identified as the echo
+	text   string       // echoed text received so far
+	parts  []state.Part // the echoed message so far, with message IDs
+	entry  string       // separate entry for a divergent echo without message IDs
 	// rejected holds agent message IDs whose first chunk did not start like
 	// the prompt; later chunks of those messages are never the echo.
 	rejected map[string]bool
@@ -462,6 +464,12 @@ func (a *App) Delete(id string) error {
 }
 
 func (a *App) Send(id, text string) error {
+	return a.SendParts(id, []state.Part{{Text: text}})
+}
+
+// SendParts sends a message of text and files, in the order given.
+func (a *App) SendParts(id string, parts []state.Part) error {
+	text := state.PartsText(parts)
 	if strings.TrimSpace(text) == "" {
 		return errors.New("enter a message")
 	}
@@ -490,7 +498,7 @@ func (a *App) Send(id, text string) error {
 	// The first message names the thread, whatever placeholder the agent gave a
 	// session that has nothing in it yet. A title the user chose stays.
 	if !t.Renamed && (t.Title == "New thread" || (r.live() && len(r.Entries) == 0)) {
-		title := []rune(strings.Join(strings.Fields(text), " "))
+		title := []rune(strings.Join(strings.Fields(promptTitle(parts)), " "))
 		if len(title) > 60 {
 			title = append(title[:59], '…')
 		}
@@ -508,11 +516,11 @@ func (a *App) Send(id, text string) error {
 	a.notifyLocked()
 	config := *t.Thread
 	a.wg.Add(1)
-	go a.run(config, text, r, j)
+	go a.run(config, parts, r, j)
 	return nil
 }
 
-func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
+func (a *App) run(t state.Thread, parts []state.Part, r *runtime, j *job) {
 	defer a.wg.Done()
 	defer a.wakeWorkspace() // The turn may have changed the folder.
 	defer j.cancel()
@@ -524,13 +532,14 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 		current.Title, a.dirty = j.title, true
 		a.notifyLocked()
 	}
-	local := state.Entry{ID: state.ID(), Role: "user", Text: text}
+	local := localEntry(parts)
 	r.Entries = append(r.Entries, local)
 	before := len(r.Entries)
 	a.notifyLocked()
 	a.mu.Unlock()
 	result := &acp.PromptResponse{}
 	if err == nil {
+		prompt, target, files := promptBlocks(parts) // Encoding a large file takes a moment.
 		a.mu.Lock()
 		if j.stopping {
 			// Stopped while connecting: the prompt is never sent. A Stop just
@@ -540,11 +549,11 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 			a.mu.Unlock()
 		} else {
 			r.status, r.acceptUpdates = "Working…", true
-			r.echo = promptEcho{target: text, local: local.ID}
+			r.echo = promptEcho{target: target, files: files, local: local.ID}
 			sessionID := r.session
 			a.notifyLocked()
 			a.mu.Unlock()
-			response, promptErr := p.Conn.SessionPrompt(j.ctx, &acp.PromptRequest{SessionID: acp.SessionId(sessionID), Prompt: []acp.ContentBlock{acp.TextContentBlock(text)}})
+			response, promptErr := p.Conn.SessionPrompt(j.ctx, &acp.PromptRequest{SessionID: acp.SessionId(sessionID), Prompt: prompt})
 			if err = promptErr; err != nil {
 				err = p.Error(err)
 			} else {
@@ -594,6 +603,47 @@ func (a *App) run(t state.Thread, text string, r *runtime, j *job) {
 	r.acceptUpdates = r.live()
 	r.job = nil
 	a.notifyLocked()
+}
+
+// promptTitle is what a prompt says, or with nothing written, the files it has.
+func promptTitle(parts []state.Part) string {
+	written := ""
+	for _, part := range parts {
+		written += part.Text
+	}
+	if strings.TrimSpace(written) != "" {
+		return written
+	}
+	return state.PartsText(parts)
+}
+
+// localEntry is Mu's copy of a prompt, shown until the agent says otherwise.
+func localEntry(parts []state.Part) state.Entry {
+	entry := state.Entry{ID: state.ID(), Role: "user", Text: state.PartsText(parts)}
+	if !slices.ContainsFunc(parts, func(p state.Part) bool { return p.File != nil }) {
+		return entry
+	}
+	entry.Parts = slices.Clone(parts)
+	for i, part := range entry.Parts {
+		if part.File != nil {
+			entry.Parts[i].File = part.File.Shown()
+		}
+	}
+	return entry
+}
+
+// promptBlocks is a prompt as ACP content, with its text and how many files it has.
+func promptBlocks(parts []state.Part) (blocks []acp.ContentBlock, text string, files int) {
+	for _, part := range parts {
+		if part.File != nil {
+			blocks = append(blocks, part.File.Block())
+			files++
+			continue
+		}
+		blocks = append(blocks, acp.TextContentBlock(part.Text))
+		text += part.Text
+	}
+	return blocks, text, files
 }
 
 // stopReasonText explains a turn that ended for a reason other than the agent

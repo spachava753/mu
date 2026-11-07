@@ -49,7 +49,13 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 	if waiting {
 		*v.draft(t.ID) = queued // What shows is what will go out.
 	}
-	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).Disabled(t.Running).ReadOnly(waiting).OnTextKey(func(k ui.TextKey) bool {
+	services := c.Services()
+	input := ui.TextAreaBase(c.Key("message"), v.draft(t.ID)).Label("Message").Placeholder("Message the agent… / for commands").Lines(1, 8).Padding(12, 14, 8, 14).FocusRing(false).Disabled(t.Running).ReadOnly(waiting).OnPaste(func(text string) bool {
+		if _, waiting := v.queued[t.ID]; waiting {
+			return false
+		}
+		return v.pasteFiles(services, t.ID, text)
+	}).OnTextKey(func(k ui.TextKey) bool {
 		if _, waiting := v.queued[t.ID]; waiting {
 			// Waiting to send: another Enter changes nothing, and Escape takes it back.
 			if k.Key == ui.KeyEscape && k.Mods == 0 {
@@ -84,6 +90,9 @@ func (v *View) messageInput(c *ui.Context, t app.ThreadView, anchor ui.Element) 
 			}
 		}
 		if k.Key == ui.KeyEnter && k.Mods == 0 && !t.Running {
+			if v.stillReading(t.ID) {
+				return true // It goes once its files are read: Enter again.
+			}
 			switch {
 			case !t.Configuring:
 				if v.send(t.ID, k.Text()) {

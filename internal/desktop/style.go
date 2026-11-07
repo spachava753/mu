@@ -116,6 +116,11 @@ var (
 	toolIcon        = svg(`<path d="m5 16.5 4.5-4.5L5 7.5M12 17h7"/>`)
 	thoughtIcon     = svg(`<path d="M9.5 18h5M10.5 21h3M12 3.5c-3.3 0-5.5 2.5-5.5 5.4 0 1.9 1 3.2 2 4.1.6.6 1 1.3 1 2.1V15h5v.1c0-.8.4-1.5 1-2.1 1-.9 2-2.2 2-4.1 0-2.9-2.2-5.4-5.5-5.4z"/>`)
 	planIcon        = svg(`<path d="m4 6.5 1.6 1.6L8.5 5M4 16.5l1.6 1.6 2.9-3.1M12 7h8M12 12h8M12 17h8"/>`)
+	paperclipIcon   = svg(`<path d="m20 11.5-8.4 8.4a5 5 0 0 1-7.1-7.1l8.8-8.8a3.3 3.3 0 0 1 4.7 4.7l-8.8 8.8a1.7 1.7 0 0 1-2.4-2.4l8-8"/>`)
+	documentIcon    = svg(`<path d="M14 3.5H7c-.8 0-1.5.7-1.5 1.5v14c0 .8.7 1.5 1.5 1.5h10c.8 0 1.5-.7 1.5-1.5V8L14 3.5z"/><path d="M14 3.5V8h4.5M9 13h6M9 16.5h6"/>`)
+	imageIcon       = svg(`<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m20.5 15.5-4.2-4.2L6.5 19.5"/>`)
+	audioIcon       = svg(`<path d="M9 18V6l10.5-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17" cy="16" r="2.5"/>`)
+	videoIcon       = svg(`<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10.5 5-3v9l-5-3"/>`)
 	warningIcon     = svg(`<path d="M12 4 3 19.5h18L12 4z"/><path d="M12 10v4.5M12 17.2v.1"/>`)
 )
 

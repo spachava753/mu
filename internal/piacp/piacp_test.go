@@ -1160,3 +1160,129 @@ func TestDetect(t *testing.T) {
 		t.Fatalf("detection wrote %v", paths)
 	}
 }
+
+func (c *client) promptBlocks(id acp.SessionId, blocks ...acp.ContentBlock) (*acp.PromptResponse, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+	return c.p.Conn.SessionPrompt(ctx, &acp.PromptRequest{SessionID: id, Prompt: blocks})
+}
+
+// userMessage describes the user's message as replayed, in order, and checks it is
+// one message.
+func (c *client) userMessage(t *testing.T, id acp.SessionId) string {
+	t.Helper()
+	var out []string
+	messages := map[string]bool{}
+	for _, u := range c.received(id) {
+		if u.SessionUpdate != acp.SessionUpdateTypeUserMessageChunk {
+			continue
+		}
+		messages[string(*u.MessageID)] = true
+		b := u.Content.(acp.ContentBlock)
+		if b.Type == acp.ContentBlockTypeText {
+			out = append(out, b.Text)
+		} else {
+			out = append(out, string(b.Type)+":"+b.Data)
+		}
+	}
+	if len(messages) != 1 {
+		t.Fatalf("replayed as %d messages: %v", len(messages), out)
+	}
+	return strings.Join(out, "|")
+}
+
+// Images go in the images field, which Pi shows the model after the text.
+func TestImagesFollowTheText(t *testing.T) {
+	text, image := acp.TextContentBlock, func(data string) acp.ContentBlock { return acp.ImageContentBlock(data, "image/png") }
+	for _, test := range []struct {
+		name   string
+		blocks []acp.ContentBlock
+		sent   string
+		replay string
+	}{
+		{"after the text", []acp.ContentBlock{text("look at these"), image("QQ=="), image("Qg==")}, "prompt look at these", "look at these|image:QQ==|image:Qg=="},
+		{"before the text", []acp.ContentBlock{image("QQ=="), text("what is this")}, "prompt what is this", "what is this|image:QQ=="},
+		{"alone", []acp.ContentBlock{image("QQ==")}, "prompt", "image:QQ=="},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			e := newEnv(t)
+			c := e.connect()
+			cwd := e.folder("a")
+			id := c.newSession(cwd)
+			if _, err := c.promptBlocks(id, test.blocks...); err != nil {
+				t.Fatal(c.p.Error(err))
+			}
+			calls := e.calls()
+			if !slices.Contains(calls, test.sent) {
+				t.Fatalf("calls %q, want %q", calls, test.sent)
+			}
+			c.p.Close()
+			c = e.connect()
+			c.reset()
+			if err := c.load(id, cwd); err != nil {
+				t.Fatal(c.p.Error(err))
+			}
+			if got := c.userMessage(t, id); got != test.replay {
+				t.Fatalf("replayed %q, want %q", got, test.replay)
+			}
+		})
+	}
+}
+
+func TestPiSaysWhatItCannotTake(t *testing.T) {
+	e := newEnv(t)
+	c := e.connect()
+	id := c.newSession(e.folder("a"))
+	mimeType := "application/pdf"
+	blob := acp.BlobResourceContentsEmbeddedResourceResource("QQ==", "file:///tmp/a.pdf")
+	blob.MimeType = &mimeType
+	for _, test := range []struct {
+		block acp.ContentBlock
+		want  string
+	}{
+		{acp.AudioContentBlock("QQ==", "audio/mpeg"), "audio"},
+		{acp.ResourceContentBlock(blob), "a application/pdf file"},
+		{acp.ResourceContentBlock(acp.BlobResourceContentsEmbeddedResourceResource("QQ==", "file:///tmp/a.bin")), "a binary file"},
+	} {
+		_, err := c.promptBlocks(id, acp.TextContentBlock("look "), test.block)
+		if err == nil || !strings.Contains(err.Error(), "Pi can't take "+test.want) {
+			t.Fatalf("%s: gave %v", test.want, err)
+		}
+	}
+	// The session goes on.
+	if _, err := c.prompt(id, "hello"); err != nil {
+		t.Fatal(c.p.Error(err))
+	}
+}
+
+func TestLinksAndTextFilesReachPi(t *testing.T) {
+	e := newEnv(t)
+	c := e.connect()
+	id := c.newSession(e.folder("a"))
+	_, err := c.promptBlocks(id,
+		acp.TextContentBlock("first "),
+		acp.ResourceLinkContentBlock("big.mov", "file:///tmp/big.mov"),
+		acp.TextContentBlock(" then"),
+		acp.ResourceContentBlock(acp.TextResourceContentsEmbeddedResourceResource("the notes", "file:///tmp/notes.txt")),
+	)
+	if err != nil {
+		t.Fatal(c.p.Error(err))
+	}
+	want := "prompt first \nfile:///tmp/big.mov then\nfile:///tmp/notes.txt:\nthe notes"
+	if calls := e.calls(); !slices.Contains(calls, want) {
+		t.Fatalf("calls %q, want %q", calls, want)
+	}
+}
+
+func TestCompactRefusesImages(t *testing.T) {
+	e := newEnv(t)
+	c := e.connect()
+	id := c.newSession(e.folder("a"))
+	_, err := c.promptBlocks(id, acp.TextContentBlock("/compact "), acp.ImageContentBlock("QQ==", "image/png"))
+	if err == nil || !strings.Contains(err.Error(), "/compact can't take images") {
+		t.Fatalf("gave %v", err)
+	}
+	if calls := e.calls(); slices.ContainsFunc(calls, func(call string) bool { return strings.HasPrefix(call, "compact") }) {
+		t.Fatalf("compacted anyway: %q", calls)
+	}
+}
